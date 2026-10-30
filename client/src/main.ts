@@ -351,6 +351,8 @@ function navigate(next: View): void {
   app.classList.remove('detail-open');
   app.classList.toggle('profile-picker-open', next === 'profiles');
   app.classList.toggle('live-tv-open', next === 'live');
+  document.documentElement.classList.toggle('live-tv-open', next === 'live');
+  document.body.classList.toggle('live-tv-open', next === 'live');
   app.classList.toggle('settings-open', next === 'settings');
   app.classList.toggle('search-open', next === 'search');
   document.documentElement.classList.toggle('settings-open', next === 'settings');
@@ -835,6 +837,9 @@ async function showList(section: 'movies' | 'series' | 'live', append = false, c
         livePreviewSourceUrl = '';
         livePreviewSourceFormat = 'm3u8';
         previewStatus.textContent = 'Connecting to channel…';
+        // webOS 4.5 blocks audible autoplay after the async stream lookup. Start
+        // the inline preview muted; opening fullscreen restores channel audio.
+        video.muted = true;
         video.pause(); video.removeAttribute('src'); video.load();
         video.classList.add('central-inline-video'); video.classList.remove('central-inline-playing');
         preview.appendChild(video);
@@ -1369,6 +1374,7 @@ async function play(item: Item, liveFormat: 'm3u8' | 'ts' = 'm3u8', resumeAt?: n
     if (playableItem.kind === 'live') livePreviewGeneration += 1;
     if (video.parentElement !== player) player.insertBefore(video, player.firstChild);
     video.classList.remove('central-inline-video');
+    video.muted = false;
     playingItem = playableItem;
     player.classList.toggle('live-playback', playableItem.kind === 'live');
     updatePlayerOptionVisibility();

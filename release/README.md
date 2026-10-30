@@ -1,11 +1,11 @@
 # NightOwl for LG webOS TV
 
-Version 0.2.0 is packaged for LG webOS TV 4.5 / Chromium 53, including the C9.
+Version 0.2.1 is packaged for LG webOS TV 4.5 / Chromium 53, including the C9. It fixes Live TV viewport sizing on older webOS engines and starts channel previews muted so TV autoplay restrictions do not block the video.
 
-Download [`NightOwl-webos-c9-0.2.0.ipk`](NightOwl-webos-c9-0.2.0.ipk) and install it using the webOS TV CLI after pairing the TV in Developer Mode:
+Download [`NightOwl-webos-c9-0.2.1.ipk`](NightOwl-webos-c9-0.2.1.ipk) and install it using the webOS TV CLI after pairing the TV in Developer Mode:
 
 ```powershell
-ares-install --device <your-device-name> .\NightOwl-webos-c9-0.2.0.ipk
+ares-install --device <your-device-name> .\NightOwl-webos-c9-0.2.1.ipk
 ```
 
 The app connects to `https://[redacted]`. Sign in with the NightOwl account created by the administrator. Xtream credentials remain in the server Settings page.
