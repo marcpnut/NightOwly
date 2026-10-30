@@ -4,5 +4,7 @@ packages/
 .env
 .env.*
 !.env.example
+!client/.env.webos
 *.log
 demo-assets/flower.mp4
+deployment/out/

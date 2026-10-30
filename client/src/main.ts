@@ -1,13 +1,20 @@
 import './style.css';
 
 type Kind = 'movie' | 'series' | 'live' | 'episode';
+type DescriptionStatus = 'available' | 'none' | 'unavailable';
 type Item = { kind: Kind; id: string; title: string; description?: string; posterUrl?: string; backdropUrl?: string;
+  descriptionStatus?: DescriptionStatus;
   genre?: string; releaseYear?: number; durationSeconds?: number; rating?: number; positionSeconds?: number; seasonNumber?: number; episodeNumber?: number;
-  metadata?: { language?: string; audio?: string; subtitles?: string } };
-type Profile = { id: string; name: string };
-type Home = { featured: Item | null; rows: Array<{ id: string; title: string; items: Item[] }> };
+  streamId?: string; canonicalId?: string; streams?: Array<{ id: string; providerId?: string; language?: string; languageCode?: string; extension?: string }>;
+  seriesId?: string; seriesTitle?: string; highlightEpisodeCanonicalId?: string; highlightSeasonNumber?: number;
+  metadata?: { language?: string; languageCode?: string; audio?: string; subtitles?: string; tmdbId?: string } };
+type Profile = { id: string; name: string; preferences?: { language?: string } };
+type Home = { featured: Item | null; discoverySource?: 'tmdb' | 'catalog'; attribution?: boolean; rows: Array<{ id: string; title: string; items: Item[] }> };
+type CatalogPage = { items: Item[]; hasMore: boolean };
+type BrowseCategory = { id: string; name: string; type?: string; itemCount?: number };
+type AppLanguage = { code: string; name: string };
 type Config = { url: string; token: string };
-type View = 'home' | 'movies' | 'series' | 'live' | 'my-list' | 'search' | 'settings' | 'detail' | 'profiles';
+type View = 'home' | 'whats-new' | 'movies' | 'series' | 'live' | 'my-list' | 'search' | 'settings' | 'detail' | 'profiles' | 'database';
 
 const el = <T extends HTMLElement = HTMLElement>(id: string): T => document.getElementById(id) as T;
 const setup = el('central-setup');
@@ -18,6 +25,12 @@ const video = el<HTMLVideoElement>('central-video');
 const player = el('central-player');
 const playerStatus = el('central-player-status');
 const profileButton = el<HTMLButtonElement>('central-profile');
+const pageScrollControls = el<HTMLElement>('central-page-scroll-controls');
+const pageUpButton = el<HTMLButtonElement>('central-page-up');
+const pageDownButton = el<HTMLButtonElement>('central-page-down');
+function renderProfileButton(): void {
+  profileButton.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 21a8 8 0 0 0-16 0M12 13a5 5 0 1 0 0-10 5 5 0 0 0 0 10Z"/></svg>';
+}
 let config: Config | null = null;
 function deviceIdentifier(): string {
   const stored = localStorage.getItem('streamcinema.device');
@@ -34,23 +47,55 @@ function deviceIdentifier(): string {
 const deviceId = deviceIdentifier();
 let profile: Profile | null = null;
 let profiles: Profile[] = [];
+const appLanguage = 'en';
+let availableLanguages: AppLanguage[] = [];
+let subtitleSearchLanguages: string[] = (() => {
+  try { const value = JSON.parse(localStorage.getItem('streamcinema.subtitle-languages') || '[]'); return Array.isArray(value) ? value.filter((code): code is string => typeof code === 'string') : []; }
+  catch { return []; }
+})();
+let preferHearingImpairedSubtitles = localStorage.getItem('streamcinema.subtitle-hearing-impaired') === 'true';
 let view: View = 'home';
 let previousView: View = 'home';
 let lastFocus: HTMLElement | null = null;
 let restoreCardKey = '';
 let currentItem: Item | null = null;
 let playingItem: Item | null = null;
+let livePreviewLoader: ((item: Item) => void) | null = null;
+let livePreviewGeneration = 0;
+let livePreviewSourceUrl = '';
+let livePreviewSourceFormat: 'm3u8' | 'ts' = 'm3u8';
 let page = 1;
 let loadedItems: Item[] = [];
 const selectedCategoryBySection: Record<'movies' | 'series' | 'live', string> = { movies: '', series: '', live: '' };
+let selectedLiveCountry = '';
+let hiddenLiveCategoryIds = (() => {
+  try { const saved = JSON.parse(localStorage.getItem('streamcinema.hidden-live-categories') || '[]') as unknown; return new Set(Array.isArray(saved) ? saved.filter((id): id is string => typeof id === 'string') : []); }
+  catch { return new Set<string>(); }
+})();
+let selectedLiveSearch = '';
+let liveSearchTimer = 0;
+let liveSearchGeneration = 0;
 let requestGeneration = 0;
-let activeController: AbortController | null = null;
+const activeControllers = new Set<AbortController>();
 let lastProgressSave = 0;
 let subtitlesIndex = -1;
-let audioIndex = 0;
+let externalSubtitleTrack: HTMLTrackElement | null = null;
+let externalSubtitleBlobUrl = '';
 let activeLiveFormat: 'm3u8' | 'ts' = 'm3u8';
+let activeRemuxMode: 'copy' | 'transcode' | null = null;
+let remuxTranscodeAttempted = false;
+let playerControlsTimer = 0;
 const watched = new Map<string, number>();
 const favorites = new Set<string>();
+const catalogApiCache = new Map<string, { value: unknown; expiresAt: number }>();
+const catalogApiInflight = new Map<string, Promise<unknown>>();
+const apiCacheLifetime = 5 * 60_000;
+let catalogApiRevision = 0;
+const cachedViews = new Map<View, { content: DocumentFragment; scrollY: number; expiresAt: number }>();
+const viewCacheLifetime = 5 * 60_000;
+const cacheableViews = new Set<View>(['home', 'movies', 'series']);
+const categoryViewScrollHandlers = new Map<View, () => void>();
+let activeCategoryPageScrollHandler: (() => void) | null = null;
 function playbackClock(seconds: number): string {
   if (!Number.isFinite(seconds)) return 'LIVE';
   const value = Math.max(0, Math.floor(seconds));
@@ -61,8 +106,25 @@ function playbackClock(seconds: number): string {
 function updatePlaybackProgress(): void {
   el('central-player-time').textContent = playbackClock(video.currentTime);
   el('central-player-duration').textContent = playbackClock(video.duration);
-  el('central-player-fill').style.width = Number.isFinite(video.duration) && video.duration > 0
-    ? `${Math.max(0, Math.min(100, video.currentTime / video.duration * 100))}%` : '0%';
+  const percent = Number.isFinite(video.duration) && video.duration > 0
+    ? Math.max(0, Math.min(100, video.currentTime / video.duration * 100)) : 0;
+  const seekbar = el<HTMLInputElement>('central-player-track');
+  seekbar.style.setProperty('--progress-percent', `${percent}%`);
+  seekbar.value = `${Math.round(percent * Number(seekbar.max) / 100)}`;
+  seekbar.setAttribute('aria-valuenow', seekbar.value);
+  seekbar.setAttribute('aria-valuetext', `${playbackClock(video.currentTime)} of ${playbackClock(video.duration)}`);
+}
+function revealPlayerControls(): void {
+  window.clearTimeout(playerControlsTimer);
+  player.classList.remove('controls-hidden');
+  if (player.classList.contains('hidden') || video.paused || !el('central-player-stream-menu').classList.contains('hidden')) return;
+  playerControlsTimer = window.setTimeout(() => {
+    playerControlsTimer = 0;
+    if (player.classList.contains('hidden') || video.paused || !el('central-player-stream-menu').classList.contains('hidden')) return;
+    const active = document.activeElement as HTMLElement | null;
+    if (active && player.contains(active) && active !== video) active.blur();
+    player.classList.add('controls-hidden');
+  }, 5000);
 }
 
 function clear(node: HTMLElement): void { while (node.firstChild) node.removeChild(node.firstChild); }
@@ -72,32 +134,231 @@ function node<K extends keyof HTMLElementTagNameMap>(tag: K, className?: string,
   if (text !== undefined) element.textContent = text;
   return element;
 }
+function updatePageScrollControls(): void {
+  const visible = !app.classList.contains('hidden') && player.classList.contains('hidden') && view !== 'profiles' && view !== 'settings';
+  const searchResults = view === 'search' ? content.querySelector<HTMLElement>('.central-search-results') : null;
+  if (searchResults) {
+    const maxScroll = Math.max(0, searchResults.scrollHeight - searchResults.clientHeight);
+    const rect = searchResults.getBoundingClientRect();
+    const canScroll = maxScroll >= 24;
+    pageScrollControls.classList.toggle('hidden', !visible || !canScroll);
+    pageUpButton.classList.toggle('hidden', searchResults.scrollTop < 24);
+    pageDownButton.classList.toggle('hidden', searchResults.scrollTop >= maxScroll - 24);
+    pageUpButton.style.top = `${Math.max(74, rect.top + 8)}px`;
+    pageUpButton.style.bottom = 'auto';
+    pageDownButton.style.top = 'auto';
+    pageDownButton.style.bottom = `${Math.max(12, window.innerHeight - rect.bottom + 8)}px`;
+    return;
+  }
+  const liveGrid = view === 'live' ? content.querySelector<HTMLElement>('.central-live-grid') : null;
+  if (liveGrid) {
+    pageUpButton.style.removeProperty('top'); pageUpButton.style.removeProperty('bottom');
+    const maxScroll = Math.max(0, liveGrid.scrollHeight - liveGrid.clientHeight);
+    pageScrollControls.classList.toggle('hidden', !visible || maxScroll < 24);
+    pageUpButton.classList.toggle('hidden', liveGrid.scrollTop < 24);
+    pageDownButton.classList.toggle('hidden', liveGrid.scrollTop >= maxScroll - 24);
+    return;
+  }
+  const scrollingElement = document.scrollingElement ?? document.documentElement;
+  const maxScroll = Math.max(0, Math.max(scrollingElement.scrollHeight, document.body.scrollHeight, content.scrollHeight) - window.innerHeight);
+  const currentScroll = Math.max(window.scrollY, scrollingElement.scrollTop, document.body.scrollTop);
+  pageScrollControls.classList.toggle('hidden', !visible || maxScroll < 24);
+  pageUpButton.classList.toggle('hidden', currentScroll < 24);
+  pageDownButton.classList.toggle('hidden', currentScroll >= maxScroll - 24);
+  if (view === 'home' || view === 'whats-new' || view === 'movies' || view === 'series') {
+    const headerBottom = document.getElementById('central-header')?.getBoundingClientRect().bottom ?? 88;
+    const firstVisibleRow = Array.from(content.querySelectorAll<HTMLElement>('.central-row'))
+      .find((row) => { const rect = row.getBoundingClientRect(); return rect.bottom > headerBottom && rect.top < window.innerHeight; });
+    const rowTop = firstVisibleRow?.getBoundingClientRect().top ?? headerBottom + 8;
+    pageUpButton.style.top = `${Math.max(headerBottom + 8, Math.min(window.innerHeight - 50, rowTop))}px`;
+    pageUpButton.style.bottom = 'auto';
+  }
+}
+let headerFadeFrame = 0;
+function updateHeaderTextFade(): void {
+  headerFadeFrame = 0;
+  const headerHeight = (document.getElementById('central-header')?.getBoundingClientRect().height ?? 88) + 52;
+  const textElements = content.querySelectorAll<HTMLElement>('h1,h2,h3,h4,p,small,strong,.central-card-title,.central-card-meta,.central-page-kicker,.central-page-title,.central-page-description,.central-detail-meta,.central-episode-title,.central-episode-description');
+  textElements.forEach((element) => {
+    const rect = element.getBoundingClientRect();
+    if (rect.top >= headerHeight || rect.bottom <= 0) {
+      element.style.removeProperty('mask-image'); element.style.removeProperty('-webkit-mask-image');
+      return;
+    }
+    const startOpacity = Math.max(0, Math.min(1, rect.top / headerHeight));
+    const endPosition = Math.max(0, Math.min(rect.height, headerHeight - rect.top));
+    const mask = `linear-gradient(to bottom, rgba(0,0,0,${startOpacity}) 0px, #000 ${endPosition}px, #000 100%)`;
+    element.style.setProperty('mask-image', mask); element.style.setProperty('-webkit-mask-image', mask);
+  });
+}
+function scheduleHeaderTextFade(): void {
+  if (!headerFadeFrame) headerFadeFrame = window.requestAnimationFrame(updateHeaderTextFade);
+}
+function movePage(direction: -1 | 1): void {
+  const searchResults = view === 'search' ? content.querySelector<HTMLElement>('.central-search-results') : null;
+  if (searchResults) {
+    searchResults.scrollBy({ top: direction * Math.max(220, searchResults.clientHeight * .8), behavior: 'smooth' });
+    return;
+  }
+  const liveGrid = view === 'live' ? content.querySelector<HTMLElement>('.central-live-grid') : null;
+  if (liveGrid) {
+    liveGrid.scrollBy({ top: direction * Math.max(220, liveGrid.clientHeight * .8), behavior: 'smooth' });
+    return;
+  }
+  window.scrollTo({ top: Math.max(0, Math.min(document.documentElement.scrollHeight - window.innerHeight,
+    window.scrollY + direction * Math.max(320, window.innerHeight * 0.78))), behavior: 'smooth' });
+}
+pageUpButton.onclick = () => movePage(-1);
+pageDownButton.onclick = () => movePage(1);
+window.addEventListener('scroll', () => { updatePageScrollControls(); scheduleHeaderTextFade(); activeCategoryPageScrollHandler?.(); }, { passive: true });
+window.addEventListener('resize', () => { updatePageScrollControls(); scheduleHeaderTextFade(); });
+new MutationObserver(() => { updatePageScrollControls(); scheduleHeaderTextFade(); }).observe(content, { childList: true, subtree: true });
+let shelfSequence = 0;
+function addShelfControls(section: HTMLElement, list: HTMLElement): void {
+  const shelf = node('div', 'central-shelf');
+  const listId = `central-shelf-${++shelfSequence}`; list.id = listId;
+  const arrow = (direction: 'left' | 'right'): HTMLButtonElement => {
+    const button = node('button', `central-shelf-arrow ${direction}`) as HTMLButtonElement;
+    button.type = 'button'; button.setAttribute('aria-label', `${direction === 'left' ? 'Scroll shelf left' : 'Scroll shelf right'}`);
+    button.setAttribute('aria-controls', listId);
+    button.innerHTML = direction === 'left'
+      ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 5-7 7 7 7"/></svg>'
+      : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>';
+    button.onclick = () => list.scrollBy({ left: (direction === 'left' ? -1 : 1) * Math.max(300, list.clientWidth * .78), behavior: 'smooth' });
+    return button;
+  };
+  const left = arrow('left'), right = arrow('right');
+  const update = (): void => {
+    const active = section.classList.contains('is-active');
+    left.classList.toggle('hidden', !active || list.scrollWidth <= list.clientWidth + 2 || list.scrollLeft <= 1);
+    right.classList.toggle('hidden', !active || list.scrollWidth <= list.clientWidth + 2 || list.scrollLeft + list.clientWidth >= list.scrollWidth - 2);
+  };
+  const activate = (): void => { section.classList.add('is-active'); update(); };
+  const deactivateIfUnfocused = (): void => { window.setTimeout(() => { if (!section.contains(document.activeElement)) { section.classList.remove('is-active'); update(); } }, 0); };
+  shelf.addEventListener('focusin', activate);
+  shelf.addEventListener('focusout', deactivateIfUnfocused);
+  shelf.addEventListener('mouseenter', activate);
+  shelf.addEventListener('mouseleave', () => { if (!section.contains(document.activeElement)) { section.classList.remove('is-active'); update(); } });
+  list.addEventListener('scroll', update, { passive: true });
+  if (typeof ResizeObserver !== 'undefined') new ResizeObserver(update).observe(list);
+  window.setTimeout(update, 0);
+  shelf.append(left, list, right); section.appendChild(shelf);
+}
 function setStatus(message: string): void { status.textContent = message; }
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : 'Request failed.'; }
-function safeUrl(value: string): string {
-  const url = new URL(value);
-  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error('Enter a valid server URL.');
-  return url.origin + url.pathname.replace(/\/+$/, '');
+function invalidateCatalogCache(): void {
+  catalogApiRevision += 1;
+  catalogApiCache.clear();
+  catalogApiInflight.clear();
+  cachedViews.clear();
+}
+function invalidateHomeCache(): void {
+  catalogApiRevision += 1;
+  for (const key of catalogApiCache.keys()) if (key.includes('|/home')) catalogApiCache.delete(key);
+  for (const key of catalogApiInflight.keys()) if (key.includes('|/home')) catalogApiInflight.delete(key);
+  cachedViews.delete('home');
+}
+function resetInlineLiveVideo(): void {
+  livePreviewGeneration += 1;
+  livePreviewSourceUrl = '';
+  livePreviewSourceFormat = 'm3u8';
+  if (video.parentElement?.classList.contains('central-live-preview')) {
+    video.pause(); video.removeAttribute('src'); video.load(); video.classList.remove('central-inline-video', 'central-inline-playing');
+    player.insertBefore(video, player.firstChild);
+  }
+  livePreviewLoader = null;
 }
 async function api<T>(path: string, body?: unknown): Promise<T> {
   if (!config) throw new Error('Connect to the catalog server first.');
+  const cacheable = body === undefined && (/^\/home(?:\?|$)/.test(path) || /^\/(?:movies|series)(?:\/categories)?(?:\?|$)/.test(path));
+  const cacheKey = `${config.url}|${config.token}|${path}`;
+  if (cacheable) {
+    const cached = catalogApiCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) return cached.value as T;
+    if (cached) catalogApiCache.delete(cacheKey);
+    const pending = catalogApiInflight.get(cacheKey);
+    if (pending) return pending as Promise<T>;
+  }
+  const revision = catalogApiRevision;
   const url = `${config.url}/api/v1${path}`;
+  // Catalog reads finish and populate the cache even if the user changes tabs while they run.
   const controller = typeof AbortController === 'function' ? new AbortController() : null;
-  activeController = controller;
+  if (controller && !cacheable) activeControllers.add(controller);
   const timeout = window.setTimeout(() => controller?.abort(), 15_000);
-  try {
+  const request = (async (): Promise<T> => {
+    try {
     const response = await fetch(url, { method: body === undefined ? 'GET' : 'POST',
       headers: { Authorization: `Bearer ${config.token}`, 'X-Device-Id': deviceId, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
       body: body === undefined ? undefined : JSON.stringify(body), signal: controller?.signal, cache: 'no-store' });
-    if (response.status === 401) throw new Error('The TV access token was rejected.');
-    if (!response.ok) throw new Error(`Server returned HTTP ${response.status}.`);
-    return await response.json() as T;
-  } finally { window.clearTimeout(timeout); if (activeController === controller) activeController = null; }
+    if (response.status === 401) throw new Error('Your NightOwl sign-in session expired. Sign in again.');
+    if (!response.ok) {
+      let message = `Server returned HTTP ${response.status}.`;
+      try {
+        const payload = await response.json() as { error?: { message?: string; details?: Array<{ path?: string; message?: string }> } };
+        if (payload.error?.message) message = payload.error.details?.length
+          ? `${payload.error.message} ${payload.error.details.map((detail) => `${detail.path}: ${detail.message}`).join('; ')}`
+          : payload.error.message;
+      } catch { /* Keep the generic HTTP message when the response isn't JSON. */ }
+      throw new Error(message);
+    }
+    const value = await response.json() as T;
+    if (cacheable && revision === catalogApiRevision) {
+      catalogApiCache.set(cacheKey, { value, expiresAt: Date.now() + apiCacheLifetime });
+      while (catalogApiCache.size > 250) catalogApiCache.delete(catalogApiCache.keys().next().value as string);
+    }
+    return value;
+    } finally { window.clearTimeout(timeout); if (controller) activeControllers.delete(controller); }
+  })();
+  if (cacheable) {
+    catalogApiInflight.set(cacheKey, request);
+    void request.finally(() => { if (catalogApiInflight.get(cacheKey) === request) catalogApiInflight.delete(cacheKey); }).catch(() => undefined);
+  }
+  return request;
 }
-function cancelRequest(): void { activeController?.abort(); requestGeneration += 1; }
+async function loginWithAccount(username: string, password: string): Promise<Config> {
+  const url = import.meta.env.VITE_NIGHTOWL_SERVER_URL || location.origin;
+  const response = await fetch(`${url}/api/v1/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Device-Id': deviceId },
+    body: JSON.stringify({ username, password }),
+    cache: 'no-store'
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null) as { error?: { code?: string } } | null;
+    const code = payload?.error?.code;
+    if (response.status === 401) throw new Error('Username or password is incorrect.');
+    if (response.status === 429) throw new Error('Too many sign-in attempts. Try again later.');
+    if (response.status === 409) throw new Error('No NightOwl account has been created yet. Ask the administrator to create one with PowerShell.');
+    throw new Error(code ? `Sign-in failed (${code}).` : `Server returned HTTP ${response.status}.`);
+  }
+  const result = await response.json() as { accessToken: string };
+  if (!result.accessToken) throw new Error('The server did not return a sign-in session.');
+  return { url, token: result.accessToken };
+}
+function cancelRequest(): void { for (const controller of activeControllers) controller.abort(); activeControllers.clear(); requestGeneration += 1; }
 function navigate(next: View): void {
+  if (view === 'live' && next !== 'live') resetInlineLiveVideo();
+  if (cacheableViews.has(view) && activeCategoryPageScrollHandler) categoryViewScrollHandlers.set(view, activeCategoryPageScrollHandler);
+  activeCategoryPageScrollHandler = null;
   cancelRequest();
+  if (view !== next && cacheableViews.has(view) && content.childElementCount && !status.textContent) {
+    const fragment = document.createDocumentFragment();
+    while (content.firstChild) fragment.appendChild(content.firstChild);
+    cachedViews.delete(view);
+    cachedViews.set(view, { content: fragment, scrollY: window.scrollY, expiresAt: Date.now() + viewCacheLifetime });
+    while (cachedViews.size > cacheableViews.size) cachedViews.delete(cachedViews.keys().next().value as View);
+  }
   app.classList.remove('detail-open');
+  app.classList.toggle('profile-picker-open', next === 'profiles');
+  app.classList.toggle('live-tv-open', next === 'live');
+  app.classList.toggle('settings-open', next === 'settings');
+  app.classList.toggle('search-open', next === 'search');
+  document.documentElement.classList.toggle('settings-open', next === 'settings');
+  document.body.classList.toggle('settings-open', next === 'settings');
+  document.documentElement.classList.toggle('search-open', next === 'search');
+  document.body.classList.toggle('search-open', next === 'search');
+  if (next === 'settings' || next === 'search') window.scrollTo({ top: 0, behavior: 'auto' });
+  if (next === 'profiles') window.scrollTo({ top: 0, behavior: 'auto' });
   if (next !== 'detail' && next !== 'profiles') previousView = next;
   view = next;
   clear(content);
@@ -105,26 +366,81 @@ function navigate(next: View): void {
     button.classList.toggle('active', button.dataset.view === next);
   });
   setStatus('');
-  if (next === 'home') void showHome();
-  else if (next === 'movies' || next === 'series' || next === 'live') void showList(next);
-  else if (next === 'my-list') void showMyList();
+  const cached = cacheableViews.has(next) ? cachedViews.get(next) : undefined;
+  const restored = Boolean(cached && cached.expiresAt > Date.now());
+  if (restored && cached) {
+    cachedViews.delete(next);
+    content.appendChild(cached.content);
+    activeCategoryPageScrollHandler = categoryViewScrollHandlers.get(next) ?? null;
+    window.scrollTo({ top: cached.scrollY, behavior: 'auto' });
+    window.requestAnimationFrame(() => activeCategoryPageScrollHandler?.());
+  } else {
+    cachedViews.delete(next);
+    if (next === 'home') void showHome();
+    else if (next === 'whats-new') void showWhatsNew();
+    else if (next === 'movies' || next === 'series' || next === 'live') void showList(next);
+  }
+  if (restored) return;
+  if (next === 'my-list') void showMyList();
   else if (next === 'search') showSearch();
   else if (next === 'settings') void showSettings();
   else if (next === 'profiles') showProfiles();
+  else if (next === 'database') void showDatabase();
+}
+function imageUrls(value?: string): string[] {
+  if (!value) return [];
+  let candidates: unknown[] = [value.trim()];
+  const first = candidates[0];
+  if (typeof first === 'string' && /^[\[\"]/.test(first)) {
+    try { const parsed: unknown = JSON.parse(first); candidates = Array.isArray(parsed) ? parsed : [parsed]; } catch { /* Keep plain URLs unchanged. */ }
+  }
+  return candidates.flatMap((candidate) => {
+    if (typeof candidate !== 'string') return [];
+    const text = candidate.trim().replace(/^['"]|['"]$/g, '');
+    try { const url = new URL(text); return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password ? [url.href] : []; }
+    catch { return []; }
+  });
+}
+function shortGenres(value?: string): string {
+  if (!value) return '';
+  return [...new Set(value.split(/\s*(?:,|\/|\|)\s*/).map((part) => part.trim()).filter(Boolean))].slice(0, 3).join(' · ');
+}
+function normalizeDisplayTitle(value: string): string {
+  return value.replace(/^\s*(?:NL|EN|PL|FR|DE|ES|IT|PT|US|UK|NF)(?:\s+(?:4K|UHD|1080P|720P))?\s*[-:|]\s*/i, '')
+    .replace(/\s*\((?:19|20)\d{2}\)?(?:\s*\((?:MULTI\s*SUB|[A-Z]{2,3}|4K|UHD|\d{3,4}P)\))*\s*$/i, '').trim();
 }
 function card(item: Item): HTMLButtonElement {
   const button = node('button', 'central-card') as HTMLButtonElement;
   button.type = 'button';
   button.dataset.cardKey = `${item.kind}:${item.id}`;
-  button.setAttribute('aria-label', `Open ${item.title}`);
-  if (item.backdropUrl || item.posterUrl) {
-    const image = node('img'); image.src = item.backdropUrl || item.posterUrl || ''; image.alt = ''; image.loading = 'lazy';
-    image.onerror = () => image.style.visibility = 'hidden'; button.appendChild(image);
+  const isNewEpisode = item.kind === 'episode' && Boolean(item.seriesId && item.seriesTitle);
+  button.setAttribute('aria-label', isNewEpisode ? `Open ${item.seriesTitle} to play ${item.title}` : `Open ${item.title}`);
+  const posters = imageUrls(item.posterUrl), backdrops = imageUrls(item.backdropUrl);
+  const sources = item.kind === 'live'
+    ? [...posters.map((url) => ({ url, className: 'channel-logo' })), ...backdrops.map((url) => ({ url, className: 'channel-logo' }))]
+    : [...backdrops.map((url) => ({ url, className: 'backdrop-art' })), ...posters.map((url) => ({ url, className: 'poster-art' }))];
+  if (sources.length) {
+    const image = node('img'); image.alt = ''; image.loading = 'lazy'; image.decoding = 'async';
+    let sourceIndex = 0;
+    const useSource = (): void => {
+      const source = sources[sourceIndex];
+      if (!source) { image.replaceWith(node('div', 'central-placeholder')); return; }
+      image.className = source.className; image.src = source.url;
+    };
+    image.onerror = () => { sourceIndex += 1; useSource(); };
+    useSource(); button.appendChild(image);
   } else button.appendChild(node('div', 'central-placeholder'));
-  const label = node('span', 'central-card-title', item.title);
+  const label = node('span', `central-card-title${isNewEpisode ? ' central-card-episode-series' : ''}`,
+    isNewEpisode ? normalizeDisplayTitle(item.seriesTitle!) : item.title);
   button.appendChild(label);
-  const sub = node('small', 'central-card-meta', [item.releaseYear, item.genre].filter(Boolean).join(' · '));
-  button.appendChild(sub);
+  if (isNewEpisode) {
+    const seasonEpisode = `S${item.seasonNumber ?? 0} E${item.episodeNumber ?? 0}`;
+    button.appendChild(node('small', 'central-card-episode-subtitle', `${seasonEpisode} · ${item.title}`));
+  }
+  if (!isNewEpisode) {
+    const sub = node('small', 'central-card-meta', [item.releaseYear, shortGenres(item.genre)].filter(Boolean).join(' · '));
+    button.appendChild(sub);
+  }
   if (item.positionSeconds) {
     const progress = node('i', 'central-card-progress');
     progress.style.width = `${Math.max(3, Math.min(96, Math.round(100 * item.positionSeconds / (item.durationSeconds || 3600))))}%`;
@@ -138,13 +454,261 @@ function focusReturnedCard(root: HTMLElement): void {
   (preferred ?? root.querySelector<HTMLButtonElement>('button'))?.focus();
   restoreCardKey = '';
 }
-function row(title: string, items: Item[]): HTMLElement {
+function focusShelfCard(target: HTMLButtonElement, shelf: HTMLElement): void {
+  target.focus();
+  window.requestAnimationFrame(() => {
+    if (!shelf.isConnected) return;
+    const rows = Array.from(content.querySelectorAll<HTMLElement>('.central-row'));
+    const isLastLoadedShelf = rows[rows.length - 1] === shelf && !content.querySelector('[data-more-categories="true"]');
+    if (isLastLoadedShelf) {
+      const scrolling = document.scrollingElement ?? document.documentElement;
+      const pageHeight = Math.max(scrolling.scrollHeight, document.body.scrollHeight, content.scrollHeight);
+      window.scrollTo({ top: Math.max(0, pageHeight - window.innerHeight), behavior: 'smooth' });
+      return;
+    }
+    const menuBottom = document.getElementById('central-header')?.getBoundingClientRect().bottom ?? 88;
+    const safeTop = menuBottom + 20;
+    const safeBottom = window.innerHeight - 40;
+    const rect = shelf.getBoundingClientRect();
+    const delta = rect.top < safeTop ? rect.top - safeTop : rect.bottom > safeBottom ? rect.bottom - safeBottom : 0;
+    if (delta) window.scrollBy({ top: delta, behavior: 'smooth' });
+  });
+}
+function row(title: string, items: Item[], maxItems = 20): HTMLElement {
   const section = node('section', 'central-row');
   section.appendChild(node('h2', undefined, title));
   const list = node('div', 'central-cards');
-  items.slice(0, 20).forEach((item) => list.appendChild(card(item)));
-  section.appendChild(list);
+  items.slice(0, maxItems).forEach((item) => list.appendChild(card(item)));
+  addShelfControls(section, list);
   return section;
+}
+function featuredHero(item: Item, source: 'tmdb' | 'catalog' | undefined): HTMLElement {
+  const hero = node('section', 'central-hero');
+  const heroImages = [...imageUrls(item.backdropUrl), ...imageUrls(item.posterUrl)];
+  if (heroImages.length) {
+    const image = node('img'); image.alt = ''; image.loading = 'eager'; image.decoding = 'async';
+    let sourceIndex = 0;
+    image.onerror = () => { sourceIndex += 1; if (heroImages[sourceIndex]) image.src = heroImages[sourceIndex]; else image.remove(); };
+    image.src = heroImages[sourceIndex]; hero.appendChild(image);
+  }
+  const copy = node('div', 'central-hero-copy');
+  copy.appendChild(node('div', 'central-hero-eyebrow', source === 'tmdb' ? 'TRENDING ON TMDB' : 'FEATURED FOR YOU'));
+  copy.appendChild(node('h1', undefined, item.title));
+  copy.appendChild(node('div', 'central-hero-meta', [item.releaseYear, item.genre, item.kind === 'series' ? 'Series' : 'Film'].filter(Boolean).join('  ·  ')));
+  copy.appendChild(node('p', undefined, item.description || 'Ready to watch from your catalog.'));
+  const actions = node('div', 'central-hero-actions');
+  const primary = node('button', 'primary', item.kind === 'series' ? '▶  View Series' : '▶  Play') as HTMLButtonElement;
+  primary.onclick = () => item.kind === 'series' ? void openItem(item) : void play(item);
+  const info = node('button', 'secondary', 'ⓘ  More Info') as HTMLButtonElement;
+  info.onclick = () => void openItem(item);
+  actions.append(primary, info); copy.appendChild(actions); hero.appendChild(copy);
+  return hero;
+}
+function playlistRow(title: string, firstPage: CatalogPage, loadPage?: (page: number) => Promise<CatalogPage>): HTMLElement {
+  const section = node('section', 'central-row');
+  section.appendChild(node('h2', undefined, title));
+  const list = node('div', 'central-cards');
+  firstPage.items.slice(0, 20).forEach((item) => list.appendChild(card(item)));
+  addShelfControls(section, list);
+  let page = 1, hasMore = firstPage.hasMore, loading = false;
+  const appendNextPage = async (): Promise<void> => {
+    if (!loadPage || !hasMore || loading) return;
+    loading = true;
+    try {
+      const next = await loadPage(page + 1);
+      if (!next.items.length) hasMore = false;
+      else {
+        page += 1; hasMore = next.hasMore;
+        const cards = next.items.map((item) => card(item));
+        cards.forEach((itemCard) => list.appendChild(itemCard));
+      }
+    } catch { /* Keep the current shelf responsive and retry when it is scrolled again. */ }
+    finally { loading = false; }
+  };
+  list.addEventListener('scroll', () => {
+    if (!loadPage || !hasMore || loading || list.scrollWidth <= list.clientWidth) return;
+    if (list.scrollLeft + list.clientWidth < list.scrollWidth - Math.max(320, list.clientWidth * .35)) return;
+    void appendNextPage();
+  }, { passive: true });
+  return section;
+}
+
+async function showMediaShelves(section: 'movies' | 'series'): Promise<void> {
+  const generation = requestGeneration;
+  const kind = section === 'movies' ? 'movie' : 'series';
+  setStatus(`Loading ${section}…`);
+  try {
+    const [home, categoryResponse] = await Promise.all([
+      api<Home>(`/home?language=${encodeURIComponent(appLanguage)}${profile ? `&profileId=${encodeURIComponent(profile.id)}` : ''}`),
+      api<{ items: BrowseCategory[] }>(`/${section}/categories?language=${encodeURIComponent(appLanguage)}`)
+    ]);
+    if (generation !== requestGeneration) return;
+    const rowIds = section === 'movies'
+      ? new Set(['top-picks', 'top-250', 'new-releases', 'in-cinemas', 'trending-movies', 'new-movies'])
+      : new Set(['top-picks', 'trending-series', 'popular-series', 'top-series', 'on-air', 'new-series']);
+    const curatedRows = home.rows.filter((group) => rowIds.has(group.id))
+      .map((group) => ({ ...group, items: group.items.filter((item) => item.kind === kind) }))
+      .filter((group) => group.items.length).slice(0, 5);
+    const typeOrder: Record<string, number> = { genre: 0, platform: 1, collection: 2, quality: 3, other: 4 };
+    const categories = categoryResponse.items.filter((group) => group.id && group.name && (group.itemCount ?? 1) > 0)
+      .sort((a, b) => (typeOrder[a.type ?? 'other'] ?? 5) - (typeOrder[b.type ?? 'other'] ?? 5)
+        || (b.itemCount ?? 0) - (a.itemCount ?? 0) || a.name.localeCompare(b.name));
+    const initialCategories = categories.slice(0, Math.max(0, 10 - curatedRows.length));
+    let loadedCategoryCount = initialCategories.length;
+    const categoryPages = await Promise.all(initialCategories.map(async (group) => ({
+      group,
+      page: await api<CatalogPage>(`/${section}?page=1&limit=20&language=${encodeURIComponent(appLanguage)}&category=${encodeURIComponent(group.id)}`).catch(() => ({ items: [], hasMore: false }))
+    })));
+    if (generation !== requestGeneration) return;
+    const feature = home.featured?.kind === kind ? home.featured
+      : curatedRows.flatMap((group) => group.items)[0] ?? categoryPages.flatMap((entry) => entry.page.items)[0];
+    clear(content);
+    if (feature) content.appendChild(featuredHero(feature, home.discoverySource));
+    curatedRows.forEach((group) => content.appendChild(row(group.title, group.items)));
+    const categoryShelfContainer = node('div', 'central-category-shelves'); content.appendChild(categoryShelfContainer);
+    type CategoryRowRecord = { group: BrowseCategory; row: HTMLElement | null; spacer: HTMLElement | null; loading: boolean };
+    const categoryRows: CategoryRowRecord[] = [];
+    const makeCategoryPlaylist = (group: BrowseCategory, firstPage: CatalogPage): HTMLElement => playlistRow(group.name, firstPage, (nextPage) =>
+      api<CatalogPage>(`/${section}?page=${nextPage}&limit=20&language=${encodeURIComponent(appLanguage)}&category=${encodeURIComponent(group.id)}`));
+    const attachCategoryRow = (record: CategoryRowRecord, playlist: HTMLElement, before: HTMLElement | null): void => {
+      playlist.dataset.categoryIndex = `${categoryRows.indexOf(record)}`;
+      const spacer = record.spacer;
+      record.row = playlist; record.spacer = null;
+      if (spacer?.parentElement === categoryShelfContainer) categoryShelfContainer.replaceChild(playlist, spacer);
+      else if (before?.parentElement === categoryShelfContainer) categoryShelfContainer.insertBefore(playlist, before);
+      else categoryShelfContainer.appendChild(playlist);
+    };
+    const unmountCategoryRow = (record: CategoryRowRecord): void => {
+      if (!record.row || record.row.contains(document.activeElement)) return;
+      const rect = record.row.getBoundingClientRect();
+      const marginBottom = Number.parseFloat(getComputedStyle(record.row).marginBottom) || 0;
+      const spacer = node('div', 'central-row central-category-spacer'); spacer.style.height = `${Math.max(1, rect.height + marginBottom)}px`;
+      spacer.dataset.categoryIndex = `${categoryRows.indexOf(record)}`;
+      spacer.addEventListener('central-load-category-row', () => {
+        void loadCategoryRow(record).then(() => {
+          const firstCard = record.row?.querySelector<HTMLButtonElement>('[data-card-key]');
+          if (firstCard && record.row) focusShelfCard(firstCard, record.row);
+        });
+      });
+      categoryShelfContainer.replaceChild(spacer, record.row); record.row = null; record.spacer = spacer;
+    };
+    const categoryReferenceIndex = (): number => {
+      const center = window.innerHeight / 2;
+      let bestIndex = -1, bestDistance = Infinity;
+      categoryRows.forEach((record, index) => {
+        const element = record.row ?? record.spacer;
+        if (!element) return;
+        const rect = element.getBoundingClientRect();
+        const distance = Math.abs(rect.top + rect.height / 2 - center);
+        if (distance < bestDistance) { bestIndex = index; bestDistance = distance; }
+      });
+      return bestIndex;
+    };
+    const trimCategoryCache = (referenceIndex = categoryReferenceIndex()): void => {
+      let mounted = categoryRows.filter((record) => record.row);
+      while (mounted.length > 20) {
+        const victim = mounted.filter((record) => !record.row?.contains(document.activeElement))
+          .sort((a, b) => Math.abs(categoryRows.indexOf(b) - referenceIndex) - Math.abs(categoryRows.indexOf(a) - referenceIndex))[0];
+        if (!victim) break;
+        unmountCategoryRow(victim); mounted = categoryRows.filter((record) => record.row);
+      }
+    };
+    const loadCategoryRow = async (record: CategoryRowRecord): Promise<void> => {
+      if (record.loading || record.row || view !== section) return;
+      record.loading = true;
+      try {
+        const firstPage = await api<CatalogPage>(`/${section}?page=1&limit=20&language=${encodeURIComponent(appLanguage)}&category=${encodeURIComponent(record.group.id)}`);
+        if (view !== section || !categoryShelfContainer.isConnected) return;
+        if (firstPage.items.length) {
+          const playlist = makeCategoryPlaylist(record.group, firstPage);
+          const next = categoryRows.slice(categoryRows.indexOf(record) + 1).map((entry) => entry.row ?? entry.spacer).find((element): element is HTMLElement => Boolean(element));
+          attachCategoryRow(record, playlist, next ?? categorySentinel);
+          trimCategoryCache(categoryReferenceIndex());
+        } else record.spacer?.remove();
+      } catch { /* Retry when the spacer returns into the preload window. */ }
+      finally { record.loading = false; }
+    };
+    const categorySentinel = node('div', 'central-infinite-sentinel'); categorySentinel.dataset.moreCategories = 'true';
+    const appendInitialCategoryPages = (): void => {
+      categoryPages.forEach(({ group, page: firstPage }) => {
+        if (!firstPage.items.length) return;
+        const record: CategoryRowRecord = { group, row: null, spacer: null, loading: false }; categoryRows.push(record);
+        attachCategoryRow(record, makeCategoryPlaylist(group, firstPage), null);
+      });
+      categoryPages.length = 0;
+    };
+    appendInitialCategoryPages();
+    let categoryBatchLoading = false;
+    const appendNextCategoryBatch = async (focusFirst = false): Promise<void> => {
+      if (categoryBatchLoading || loadedCategoryCount >= categories.length || view !== section) return;
+      categoryBatchLoading = true;
+      const nextGroups = categories.slice(loadedCategoryCount, loadedCategoryCount + 10);
+      try {
+        const nextPages = await Promise.all(nextGroups.map(async (group) => ({ group,
+          page: await api<CatalogPage>(`/${section}?page=1&limit=20&language=${encodeURIComponent(appLanguage)}&category=${encodeURIComponent(group.id)}`).catch(() => ({ items: [], hasMore: false }))
+        })));
+        if (!categoryShelfContainer.isConnected || view !== section) return;
+        const firstNewRowIndex = categoryRows.length;
+        nextPages.forEach(({ group, page: firstPage }) => {
+          if (!firstPage.items.length) return;
+          const record: CategoryRowRecord = { group, row: null, spacer: null, loading: false }; categoryRows.push(record);
+          attachCategoryRow(record, makeCategoryPlaylist(group, firstPage), categorySentinel);
+        });
+        loadedCategoryCount += nextGroups.length;
+        trimCategoryCache(Math.max(firstNewRowIndex, categoryRows.length - 1));
+        if (loadedCategoryCount >= categories.length) { categorySentinel.remove(); categoryObserver.disconnect(); }
+        if (focusFirst) {
+          const newRow = categoryRows[firstNewRowIndex]; const firstCard = newRow?.row?.querySelector<HTMLButtonElement>('[data-card-key]');
+          firstCard?.focus(); firstCard?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+        }
+      } finally { categoryBatchLoading = false; }
+    };
+    categorySentinel.addEventListener('central-load-more-categories', () => { void appendNextCategoryBatch(true); });
+    categoryShelfContainer.appendChild(categorySentinel);
+    const categoryObserver = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) void appendNextCategoryBatch(false);
+    }, { rootMargin: '520px 0px' });
+    const onCategoryPageScroll = (): void => {
+      if (view !== section || !categoryShelfContainer.isConnected) return;
+      const preloadLimit = window.innerHeight * 1.5;
+      categoryRows.forEach((record) => {
+        const rect = record.spacer?.getBoundingClientRect();
+        if (rect && rect.top < window.innerHeight + preloadLimit && rect.bottom > -preloadLimit) void loadCategoryRow(record);
+      });
+      trimCategoryCache();
+    };
+    categoryViewScrollHandlers.set(section, onCategoryPageScroll);
+    activeCategoryPageScrollHandler = onCategoryPageScroll;
+    if (loadedCategoryCount < categories.length) categoryObserver.observe(categorySentinel);
+    else categorySentinel.remove();
+    setStatus('');
+    (content.querySelector<HTMLButtonElement>('.central-hero-actions button')
+      ?? content.querySelector<HTMLButtonElement>('[data-card-key]'))?.focus();
+  } catch (error) { if (generation === requestGeneration) setStatus(errorMessage(error)); }
+}
+async function preloadMediaShelves(section: 'movies' | 'series'): Promise<void> {
+  const kind = section === 'movies' ? 'movie' : 'series';
+  const [home, categoryResponse] = await Promise.all([
+    api<Home>(`/home?language=${encodeURIComponent(appLanguage)}${profile ? `&profileId=${encodeURIComponent(profile.id)}` : ''}`),
+    api<{ items: BrowseCategory[] }>(`/${section}/categories?language=${encodeURIComponent(appLanguage)}`)
+  ]);
+  const rowIds = section === 'movies'
+    ? new Set(['top-picks', 'top-250', 'new-releases', 'in-cinemas', 'trending-movies', 'new-movies'])
+    : new Set(['top-picks', 'trending-series', 'popular-series', 'top-series', 'on-air', 'new-series']);
+  const curatedCount = home.rows.filter((group) => rowIds.has(group.id)
+    && group.items.some((item) => item.kind === kind)).length;
+  const typeOrder: Record<string, number> = { genre: 0, platform: 1, collection: 2, quality: 3, other: 4 };
+  const categories = categoryResponse.items.filter((group) => group.id && group.name && (group.itemCount ?? 1) > 0)
+    .sort((a, b) => (typeOrder[a.type ?? 'other'] ?? 5) - (typeOrder[b.type ?? 'other'] ?? 5)
+      || (b.itemCount ?? 0) - (a.itemCount ?? 0) || a.name.localeCompare(b.name));
+  const initialCategories = categories.slice(0, Math.max(0, 10 - Math.min(5, curatedCount)));
+  await Promise.all(initialCategories.map((group) =>
+    api<CatalogPage>(`/${section}?page=1&limit=20&language=${encodeURIComponent(appLanguage)}&category=${encodeURIComponent(group.id)}`).catch(() => undefined)));
+}
+async function preloadBrowseScreens(): Promise<void> {
+  // Home is visible first; warm each tab in turn to avoid a burst of 20 catalog queries.
+  await preloadMediaShelves('movies').catch(() => undefined);
+  await preloadMediaShelves('series').catch(() => undefined);
 }
 async function showHome(): Promise<void> {
   const generation = requestGeneration;
@@ -157,74 +721,325 @@ async function showHome(): Promise<void> {
     continueRow?.items.forEach((item) => watched.set(`${item.kind}:${item.id}`, item.positionSeconds ?? 0));
     const myListRow = home.rows.find((group) => group.id === 'my-list');
     myListRow?.items.forEach((item) => favorites.add(`${item.kind}:${item.id}`));
-    if (home.featured) {
-      const hero = node('section', 'central-hero');
-      if (home.featured.backdropUrl || home.featured.posterUrl) {
-        const image = node('img'); image.src = home.featured.backdropUrl || home.featured.posterUrl || ''; image.alt = ''; hero.appendChild(image);
-      }
-      const copy = node('div', 'central-hero-copy');
-      copy.appendChild(node('div', 'central-hero-eyebrow', 'STREAMCINEMA  ·  FEATURED'));
-      copy.appendChild(node('h1', undefined, home.featured.title));
-      copy.appendChild(node('div', 'central-hero-meta', [home.featured.releaseYear, home.featured.genre, home.featured.kind === 'series' ? 'Series' : 'Film'].filter(Boolean).join('  ·  ')));
-      copy.appendChild(node('p', undefined, home.featured.description || 'Featured from your catalog.'));
-      const actions = node('div', 'central-hero-actions');
-      const playButton = node('button', 'primary', '▶  Play') as HTMLButtonElement;
-      playButton.onclick = () => void play(home.featured!); actions.appendChild(playButton);
-      const info = node('button', 'secondary', 'ⓘ  More Info') as HTMLButtonElement;
-      info.onclick = () => void openItem(home.featured!); actions.appendChild(info);
-      copy.appendChild(actions); hero.appendChild(copy); content.appendChild(hero);
-    }
-    const ordered = home.rows.filter((group) => group.items.length);
-    const first = (continueRow?.items.length ? continueRow : undefined) || ordered.find((group) => group.id === 'recommended-movies') || ordered[0];
-    if (first) content.appendChild(row(first.id === 'recommended-movies' ? 'Your Next Watch' : first.title, first.items));
-    for (const group of ordered) if (group !== first) content.appendChild(row(group.title, group.items));
+    if (home.featured) content.appendChild(featuredHero(home.featured, home.discoverySource));
+    const homeTmdbRows = new Set(['top-picks', 'top-250', 'new-releases', 'in-cinemas', 'trending-movies', 'trending-series']);
+    const nonTmdbRows = home.discoverySource === 'tmdb' ? []
+      : home.rows.filter((group) => !['continue', 'my-list', ...homeTmdbRows].includes(group.id));
+    const displayRows = [
+      continueRow,
+      ...home.rows.filter((group) => homeTmdbRows.has(group.id)),
+      ...nonTmdbRows,
+      myListRow
+    ].filter((group): group is NonNullable<typeof group> => Boolean(group?.items.length));
+    displayRows.forEach((group) => content.appendChild(row(group.title, group.items.filter((item) => item.kind !== 'live'))));
     setStatus('');
     const preferred = Array.from(content.querySelectorAll<HTMLButtonElement>('[data-card-key]')).find((button) => button.dataset.cardKey === restoreCardKey);
     (preferred ?? content.querySelector<HTMLButtonElement>('.central-hero-actions button'))?.focus();
     restoreCardKey = '';
   } catch (error) { if (generation === requestGeneration) setStatus(errorMessage(error)); }
 }
-async function showList(section: 'movies' | 'series' | 'live', append = false, category = selectedCategoryBySection[section]): Promise<void> {
+async function showWhatsNew(): Promise<void> {
+  const generation = requestGeneration;
+  setStatus('Loading this week’s new titles…');
+  try {
+    const result = await api<{ rows: Array<{ id: string; title: string; items: Item[] }> }>(`/whats-new?language=${encodeURIComponent(appLanguage)}`);
+    if (generation !== requestGeneration) return;
+    clear(content);
+    content.appendChild(node('h1', 'central-whats-new-title', "What's New"));
+    content.appendChild(node('p', 'central-whats-new-note', 'Movies, shows, and episodes added to your catalog in the past seven days.'));
+    if (!result.rows.length) content.appendChild(node('p', 'central-whats-new-empty', 'No new titles have been added this week.'));
+    for (const group of result.rows) content.appendChild(row(group.title, group.items, Number.MAX_SAFE_INTEGER));
+    setStatus('');
+    (content.querySelector<HTMLButtonElement>('.central-row [data-card-key]') ?? document.querySelector<HTMLButtonElement>('#central-nav [data-view="whats-new"]'))?.focus();
+  } catch (error) { if (generation === requestGeneration) setStatus(errorMessage(error)); }
+}
+function liveCategoryCode(name: string): string {
+  const match = name.match(/^\s*([A-Z]{2,3})\s*\|/i);
+  if (!match) return /^\s*USA(?:\s|\||$)/i.test(name) ? 'EN' : 'other';
+  const code = match[1].toUpperCase();
+  if (['UK', 'IR', 'US', 'USA', 'FOR'].includes(code)) return 'EN';
+  if (code === 'BE' || (code === 'EU' && /NETHERLANDS/i.test(name))) return 'NL';
+  return code;
+}
+async function showList(section: 'movies' | 'series' | 'live', append = false, category = selectedCategoryBySection[section], country = section === 'live' ? selectedLiveCountry : '', search = section === 'live' ? selectedLiveSearch : ''): Promise<void> {
+  if (section !== 'live' && !append) { await showMediaShelves(section); return; }
+  if (section === 'live' && !append) {
+    window.scrollTo({ top: 0, behavior: 'auto' });
+    if (content.querySelector('.central-live-preview')) resetInlineLiveVideo();
+  }
+  if (section === 'live' && category && hiddenLiveCategoryIds.has(category)) category = '';
+  const restoreLiveSearchFocus = section === 'live' && document.activeElement?.classList.contains('central-live-search');
   const generation = requestGeneration;
   if (!append) { page = 1; loadedItems = []; setStatus(`Loading ${section}…`); }
   try {
-    const [result, categoryResult] = await Promise.all([
-      api<{ items: Item[]; hasMore: boolean }>(`/${section}?page=${page}&limit=20${category ? `&category=${encodeURIComponent(category)}` : ''}`),
-      api<{ items: Array<{ id: string; name: string }> }>(`/${section}/categories`)
+    const countryQuery = section === 'live' && country ? `&country=${encodeURIComponent(country)}` : '';
+    const excludedCategoriesQuery = section === 'live' && hiddenLiveCategoryIds.size ? `&excludeCategories=${encodeURIComponent([...hiddenLiveCategoryIds].join(','))}` : '';
+    const normalizedSearch = search.trim();
+    const searchQuery = section === 'live' && normalizedSearch ? `&q=${encodeURIComponent(normalizedSearch)}` : '';
+    let [result, initialCategoryResult] = await Promise.all([
+      api<{ items: Item[]; hasMore: boolean }>(`/${section}?page=${page}&limit=20&language=${encodeURIComponent(appLanguage)}${category ? `&category=${encodeURIComponent(category)}` : ''}${countryQuery}${searchQuery}${excludedCategoriesQuery}`),
+      api<{ items: Array<{ id: string; name: string }> }>(`/${section}/categories?language=${encodeURIComponent(appLanguage)}`)
     ]);
+    if (generation !== requestGeneration) return;
+    let categoryResult = initialCategoryResult;
+    // Catalog sync can take a while; NextFlix keeps categories usable independently
+    // of the item grid, so wait briefly for the provider's category list to publish.
+    if (!categoryResult.items.length) {
+      let syncFinished = false;
+      for (let attempt = 0; attempt < 30; attempt += 1) {
+        const state = await api<{ status: string }>('/provider/status').catch(() => ({ status: 'unknown' }));
+        if (generation !== requestGeneration) break;
+        if (state.status === 'success') { syncFinished = true; break; }
+        if (state.status !== 'syncing') break;
+        await new Promise((resolve) => window.setTimeout(resolve, 1500));
+        categoryResult = await api<{ items: Array<{ id: string; name: string }> }>(`/${section}/categories?language=${encodeURIComponent(appLanguage)}`);
+        if (categoryResult.items.length) { syncFinished = true; break; }
+      }
+      if (syncFinished) {
+        const [freshItems, freshCategories] = await Promise.all([
+          api<{ items: Item[]; hasMore: boolean }>(`/${section}?page=${page}&limit=20&language=${encodeURIComponent(appLanguage)}${category ? `&category=${encodeURIComponent(category)}` : ''}${countryQuery}${searchQuery}${excludedCategoriesQuery}`),
+          api<{ items: Array<{ id: string; name: string }> }>(`/${section}/categories?language=${encodeURIComponent(appLanguage)}`)
+        ]);
+        result = freshItems;
+        categoryResult = freshCategories;
+      }
+    }
     if (generation !== requestGeneration) return;
     selectedCategoryBySection[section] = category;
     loadedItems = loadedItems.concat(result.items);
+    if (section === 'live' && video.parentElement?.classList.contains('central-live-preview')) resetInlineLiveVideo();
     clear(content);
-    const heading = node('div', 'central-list-header');
-    heading.appendChild(node('div', 'central-page-kicker', 'EXPLORE'));
-    heading.appendChild(node('h1', 'central-page-title', section === 'live' ? 'Live TV' : section === 'series' ? 'Shows' : 'Movies'));
-    content.appendChild(heading);
+    const liveScreen = section === 'live' ? node('section', 'central-live-screen') : null;
+    const heading = node('div', section === 'live' ? 'central-live-showcase' : 'central-list-header');
+    if (section !== 'live') heading.appendChild(node('div', 'central-page-kicker', 'EXPLORE'));
+    const pageTitle = node('h1', section === 'live' ? 'central-live-title' : 'central-page-title', section === 'live' ? 'Live TV' : section === 'series' ? 'Shows' : 'Movies');
+    if (section === 'live') {
+      const preview = node('div', 'central-live-preview');
+      const previewImage = node('img'); previewImage.alt = ''; previewImage.loading = 'eager'; previewImage.decoding = 'async'; previewImage.className = 'hidden';
+      const previewShade = node('div', 'central-live-preview-shade');
+      const previewTitle = node('h2', 'central-live-preview-title', 'Select a channel');
+      const previewStatus = node('small', 'central-live-preview-status');
+      preview.append(previewImage, previewShade, previewTitle, previewStatus); heading.appendChild(preview);
+      let selectedPreviewKey = '';
+      const previewRequest = (): number => livePreviewGeneration;
+      const updateLivePreview = (item: Item): void => {
+        const urls = [...imageUrls(item.backdropUrl), ...imageUrls(item.posterUrl)];
+        previewTitle.textContent = item.title;
+        previewImage.classList.toggle('hidden', urls.length === 0 || (!video.paused && video.parentElement === preview));
+        let imageIndex = 0;
+        previewImage.onerror = () => { imageIndex += 1; if (urls[imageIndex]) previewImage.src = urls[imageIndex]; else previewImage.classList.add('hidden'); };
+        if (urls.length) previewImage.src = urls[imageIndex];
+      };
+      const loadLivePreview = async (item: Item): Promise<void> => {
+        const request = ++livePreviewGeneration;
+        livePreviewSourceUrl = '';
+        livePreviewSourceFormat = 'm3u8';
+        previewStatus.textContent = 'Connecting to channel…';
+        video.pause(); video.removeAttribute('src'); video.load();
+        video.classList.add('central-inline-video'); video.classList.remove('central-inline-playing');
+        preview.appendChild(video);
+        try {
+          let resolved: { url: string };
+          let format: 'm3u8' | 'ts' = 'm3u8';
+          try { resolved = await api<{ url: string }>('/playback/resolve', { kind: 'live', id: item.streamId ?? item.id, format }); }
+          catch (error) {
+            if (!errorMessage(error).includes('HTTP 422')) throw error;
+            format = 'ts';
+            resolved = await api<{ url: string }>('/playback/resolve', { kind: 'live', id: item.streamId ?? item.id, format });
+          }
+          if (request !== previewRequest() || view !== 'live' || video.parentElement !== preview) return;
+          livePreviewSourceUrl = resolved.url;
+          livePreviewSourceFormat = format;
+          const showVideo = (): void => {
+            if (request !== previewRequest() || video.parentElement !== preview) return;
+            video.classList.add('central-inline-playing');
+            previewImage.classList.add('hidden'); previewStatus.textContent = '';
+          };
+          video.onplaying = showVideo;
+          video.onerror = () => { if (request === previewRequest() && video.parentElement === preview) previewStatus.textContent = 'Channel preview unavailable'; };
+          video.src = resolved.url; video.load();
+          await video.play();
+          showVideo();
+        } catch { if (request === previewRequest() && video.parentElement === preview) previewStatus.textContent = 'Channel preview unavailable'; }
+      };
+      livePreviewLoader = (item) => { void loadLivePreview(item); };
+      const makeLiveCard = (item: Item): HTMLButtonElement => {
+        const channelCard = card(item);
+        channelCard.onclick = () => {
+          const key = `${item.streamId ?? item.id}`;
+          lastFocus = channelCard;
+          if (selectedPreviewKey === key && video.parentElement === preview) {
+            void play(item, livePreviewSourceFormat, undefined, livePreviewSourceUrl || undefined); return;
+          }
+          selectedPreviewKey = key;
+          updateLivePreview(item);
+          void loadLivePreview(item);
+        };
+        return channelCard;
+      };
+      liveScreen?.appendChild(heading);
+      // Keep closures available for the grid and asynchronous page loader below.
+      Object.assign(heading, { updateLivePreview, makeLiveCard });
+      if (result.items[0]) updateLivePreview(result.items[0]);
+    } else { heading.appendChild(pageTitle); content.appendChild(heading); }
     const categoryBar = node('div', 'central-category-bar');
-    const addCategory = (id: string, label: string) => {
-      const button = node('button', `central-category${category === id ? ' active' : ''}`, label) as HTMLButtonElement;
-      button.onclick = () => { page = 1; loadedItems = []; void showList(section, false, id); };
-      categoryBar.appendChild(button);
-    };
-    addCategory('', 'All');
-    for (const group of categoryResult.items) addCategory(group.id, group.name);
-    content.appendChild(categoryBar);
-    const grid = node('div', 'central-grid'); loadedItems.forEach((item) => grid.appendChild(card(item))); content.appendChild(grid);
-    if (result.hasMore) {
-      const more = node('button', 'central-more', 'Load more') as HTMLButtonElement;
-      more.onclick = () => { page += 1; void showList(section, true, category); };
-      content.appendChild(more);
+    if (section === 'live') categoryBar.classList.add('central-live-category-bar');
+    let livePage = page;
+    let liveHasMore = section === 'live' && result.hasMore;
+    let liveLoading = false;
+    let liveQuery = search.trim();
+    let liveDataGeneration = liveSearchGeneration;
+    let liveGrid: HTMLElement | null = null;
+    let fetchLivePage: () => Promise<void> = async () => undefined;
+    const liveShowcase = heading as HTMLElement & { makeLiveCard?: (item: Item) => HTMLButtonElement; updateLivePreview?: (item: Item) => void };
+    const makeLiveCard = liveShowcase.makeLiveCard ?? card;
+    const liveCountries = section === 'live' ? [...new Set(categoryResult.items.map((group) => liveCategoryCode(group.name)))].sort((a, b) => a === 'other' ? 1 : b === 'other' ? -1 : a.localeCompare(b)) : [];
+    if (section === 'live') {
+      const countryLabel = node('label', 'central-category-picker');
+      countryLabel.appendChild(node('span', '', 'Language'));
+      const countrySelect = node('select', 'central-category-select') as HTMLSelectElement;
+      countrySelect.setAttribute('aria-label', 'Filter Live TV by language group');
+      countrySelect.appendChild(new Option('All languages', ''));
+      liveCountries.forEach((code) => countrySelect.appendChild(new Option(code === 'other' ? 'Other' : code, code)));
+      countrySelect.value = country;
+      countrySelect.onchange = () => {
+        selectedLiveCountry = countrySelect.value; selectedCategoryBySection.live = ''; page = 1; loadedItems = [];
+        void showList('live', false, '', selectedLiveCountry, selectedLiveSearch);
+      };
+      countryLabel.appendChild(countrySelect); categoryBar.appendChild(countryLabel);
     }
-    setStatus(result.items.length ? '' : category ? 'No items in this category.' : 'No items are available yet.');
+    const categoryLabel = node('label', 'central-category-picker');
+    categoryLabel.appendChild(node('span', '', section === 'live' ? 'Category' : 'Genres'));
+    const categorySelect = node('select', 'central-category-select') as HTMLSelectElement;
+    if (section === 'live') {
+      categorySelect.id = 'central-live-category-select';
+      categorySelect.onkeydown = (event) => {
+        if (event.key === 'ArrowRight') {
+          const searchInput = content.querySelector<HTMLInputElement>('#central-live-search');
+          if (searchInput) { event.preventDefault(); event.stopPropagation(); searchInput.focus(); }
+        }
+      };
+    }
+    categorySelect.setAttribute('aria-label', `Filter ${section} by genre`);
+    categorySelect.appendChild(new Option('All categories', ''));
+    const visibleCategories = section === 'live'
+      ? categoryResult.items.filter((group) => !hiddenLiveCategoryIds.has(group.id) && (!country || liveCategoryCode(group.name) === country))
+      : categoryResult.items;
+    for (const group of visibleCategories) {
+      if (!group.id || !group.name) continue;
+      categorySelect.appendChild(new Option(group.name, group.id));
+    }
+    categorySelect.value = category;
+    categorySelect.onchange = () => { page = 1; loadedItems = []; void showList(section, false, categorySelect.value, country, section === 'live' ? selectedLiveSearch : search); };
+    categoryLabel.appendChild(categorySelect);
+    categoryBar.appendChild(categoryLabel);
+    if (section === 'live') {
+      const searchInput = node('input', 'central-live-search') as HTMLInputElement;
+      searchInput.id = 'central-live-search';
+      searchInput.type = 'search';
+      searchInput.readOnly = false;
+      searchInput.placeholder = category ? 'Search this category' : 'Search channels';
+      searchInput.setAttribute('aria-label', category ? 'Search channels in the selected category' : 'Search live TV channels');
+      searchInput.value = search;
+      searchInput.onkeydown = (event) => {
+        const keyCode = (event as KeyboardEvent).keyCode;
+        if (event.key === 'Enter' || event.key === 'OK' || keyCode === 13 || keyCode === 23) {
+          event.preventDefault(); event.stopPropagation();
+          const firstChannel = content.querySelector<HTMLButtonElement>('.central-grid .central-card');
+          firstChannel?.focus(); firstChannel?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+          return;
+        }
+        if (event.key === 'ArrowDown') {
+          const firstChannel = content.querySelector<HTMLButtonElement>('.central-grid .central-card');
+          if (firstChannel) { event.preventDefault(); event.stopPropagation(); firstChannel.focus(); firstChannel.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }
+        }
+        if (event.key === 'ArrowUp') {
+          event.preventDefault(); event.stopPropagation();
+          document.querySelector<HTMLButtonElement>('#central-nav [data-view="live"]')?.focus();
+        }
+        if (event.key === 'ArrowLeft' && searchInput.selectionStart === 0) {
+          const categorySelect = content.querySelector<HTMLSelectElement>('#central-live-category-select');
+          if (categorySelect) { event.preventDefault(); event.stopPropagation(); categorySelect.focus(); }
+        }
+      };
+      searchInput.oninput = () => {
+        selectedLiveSearch = searchInput.value;
+        const generation = ++liveSearchGeneration;
+        window.clearTimeout(liveSearchTimer);
+        liveSearchTimer = window.setTimeout(() => {
+          const query = selectedLiveSearch.trim();
+          page = 1; livePage = 0; liveQuery = query; liveDataGeneration = generation; liveHasMore = false; liveLoading = false; loadedItems = []; clear(grid);
+          setStatus(query ? 'Searching channels…' : 'Loading channels…');
+          const queryString = query ? `&q=${encodeURIComponent(query)}` : '';
+          const excludedCategoriesQuery = hiddenLiveCategoryIds.size ? `&excludeCategories=${encodeURIComponent([...hiddenLiveCategoryIds].join(','))}` : '';
+          void api<CatalogPage>(`/live?page=1&limit=20&language=${encodeURIComponent(appLanguage)}${selectedCategoryBySection.live ? `&category=${encodeURIComponent(selectedCategoryBySection.live)}` : ''}${selectedLiveCountry ? `&country=${encodeURIComponent(selectedLiveCountry)}` : ''}${queryString}${excludedCategoriesQuery}`)
+            .then((result) => {
+              if (generation !== liveSearchGeneration || view !== 'live') return;
+              page = 1; livePage = 1; liveQuery = query; liveDataGeneration = generation; liveLoading = false; liveHasMore = result.hasMore; loadedItems = result.items;
+              result.items.forEach((item) => grid.appendChild(makeLiveCard(item)));
+              setStatus(result.items.length ? '' : query ? 'No channels match this search in the selected category.' : 'No items are available yet.');
+              if (liveHasMore) void fetchLivePage();
+            }).catch((error) => { if (generation === liveSearchGeneration && view === 'live') setStatus(errorMessage(error)); });
+        }, 250);
+      };
+      categoryBar.appendChild(searchInput);
+    }
+    if (liveScreen) liveScreen.appendChild(categoryBar); else content.appendChild(categoryBar);
+    const grid = node('div', section === 'live' ? 'central-grid central-live-grid' : 'central-grid');
+    loadedItems.forEach((item) => grid.appendChild(section === 'live' ? makeLiveCard(item) : card(item)));
+    if (liveScreen) { liveScreen.appendChild(grid); content.appendChild(liveScreen); }
+    else content.appendChild(grid);
+    if (section === 'live') grid.scrollTop = 0;
+    liveGrid = section === 'live' ? grid : null;
+    fetchLivePage = async (): Promise<void> => {
+      if (!liveScreen || !liveGrid || !liveHasMore || liveLoading || view !== 'live') return;
+      liveLoading = true;
+      const nextPage = livePage + 1, query = liveQuery, generation = liveDataGeneration;
+      const queryString = query ? `&q=${encodeURIComponent(query)}` : '';
+      const excludedCategoriesQuery = hiddenLiveCategoryIds.size ? `&excludeCategories=${encodeURIComponent([...hiddenLiveCategoryIds].join(','))}` : '';
+      try {
+        const next = await api<CatalogPage>(`/live?page=${nextPage}&limit=20&language=${encodeURIComponent(appLanguage)}${selectedCategoryBySection.live ? `&category=${encodeURIComponent(selectedCategoryBySection.live)}` : ''}${selectedLiveCountry ? `&country=${encodeURIComponent(selectedLiveCountry)}` : ''}${queryString}${excludedCategoriesQuery}`);
+        if (generation !== liveSearchGeneration || view !== 'live') return;
+        livePage = nextPage; page = nextPage; liveHasMore = next.hasMore; loadedItems = loadedItems.concat(next.items);
+        next.items.forEach((item) => liveGrid!.appendChild(makeLiveCard(item)));
+        setStatus('');
+      } catch (error) { if (generation === liveSearchGeneration && view === 'live') setStatus(errorMessage(error)); }
+      finally { liveLoading = false; }
+    };
+    if (section === 'live') {
+      grid.addEventListener('scroll', () => {
+        updatePageScrollControls();
+        if (grid.scrollHeight - grid.scrollTop - grid.clientHeight <= Math.max(240, grid.clientHeight * .8)) void fetchLivePage();
+      }, { passive: true });
+      window.requestAnimationFrame(() => { if (liveHasMore) void fetchLivePage(); });
+    } else if (result.hasMore) {
+      let nextPage = 1, hasMore = true, loading = false;
+      const loadNextPage = async (): Promise<void> => {
+        if (!hasMore || loading || !grid.isConnected) return;
+        loading = true;
+        try {
+          const next = await api<CatalogPage>(`/${section}?page=${nextPage + 1}&limit=20&language=${encodeURIComponent(appLanguage)}${category ? `&category=${encodeURIComponent(category)}` : ''}`);
+          if (!grid.isConnected) return;
+          nextPage += 1; hasMore = next.hasMore;
+          next.items.forEach((item) => grid.appendChild(card(item)));
+        } catch { /* Keep the currently loaded titles visible; scrolling can retry. */ }
+        finally { loading = false; }
+      };
+      const sentinel = node('div', 'central-infinite-sentinel'); sentinel.setAttribute('aria-hidden', 'true'); content.appendChild(sentinel);
+      const observer = new IntersectionObserver((entries) => { if (entries.some((entry) => entry.isIntersecting)) void loadNextPage(); }, { rootMargin: '500px 0px' });
+      observer.observe(sentinel);
+    }
+    setStatus(result.items.length ? '' : search.trim() ? 'No channels match this search in the selected category.' : category ? 'No items in this category.' : 'No items are available yet.');
     if (!append) focusReturnedCard(grid);
+    if (!append && restoreLiveSearchFocus) content.querySelector<HTMLInputElement>('.central-live-search')?.focus();
   } catch (error) { if (generation === requestGeneration) setStatus(errorMessage(error)); }
 }
 async function showMyList(): Promise<void> {
   if (!profile) return;
   try {
     const [result, home] = await Promise.all([
-      api<{ items: Item[] }>(`/profiles/${profile!.id}/my-list`),
-      api<Home>(`/home?profileId=${encodeURIComponent(profile.id)}`)
+      api<{ items: Item[] }>(`/profiles/${profile!.id}/my-list?language=${encodeURIComponent(appLanguage)}`),
+      api<Home>(`/home?profileId=${encodeURIComponent(profile.id)}&language=${encodeURIComponent(appLanguage)}`)
     ]);
     if (view !== 'my-list') return;
     clear(content); content.appendChild(node('div', 'central-page-kicker', 'YOUR SPACE'));
@@ -236,49 +1051,224 @@ async function showMyList(): Promise<void> {
     focusReturnedCard(content);
   } catch (error) { setStatus(errorMessage(error)); }
 }
+type DatabaseSummary = { counts: { movies: number; series: number; liveTv: number; episodes: number; episodeStreams?: number };
+  lastRefreshed?: string | null; refresh: { status: string; phase: string; processed: number; total: number; startedAt?: string; finishedAt?: string; message?: string } };
+async function showDatabase(): Promise<void> {
+  clear(content);
+  const page = node('section', 'central-database-page');
+  page.append(node('div', 'central-page-kicker', 'CATALOG'), node('h1', 'central-page-title', 'Database information'));
+  page.appendChild(node('p', 'central-db-note', 'Active stream and episode totals in the NightOwl catalog.'));
+  const counts = node('div', 'central-db-counts'); page.appendChild(counts);
+  const refresh = node('button', 'central-more central-db-refresh', 'Refresh catalog') as HTMLButtonElement;
+  const statusMessage = node('p', 'central-db-note', 'Loading catalog information…');
+  page.append(refresh, statusMessage); content.appendChild(page);
+  let polling = false;
+  const refreshStatus = (state: DatabaseSummary['refresh']): void => {
+    const progress = state.total ? ` (${state.processed.toLocaleString()} / ${state.total.toLocaleString()})` : '';
+    statusMessage.textContent = state.status === 'running' ? `${state.phase}${progress}. NightOwl compares playlist stream IDs and imports only missing entries.`
+      : state.status === 'success' ? `${state.message || 'Catalog refresh complete.'}${state.finishedAt ? ` · ${new Date(state.finishedAt).toLocaleString()}` : ''}`
+        : state.status === 'error' ? `${state.message || 'Refresh failed.'}${state.finishedAt ? ` · ${new Date(state.finishedAt).toLocaleString()}` : ''}`
+      : 'Refresh scans the provider’s full lists and series details, then adds provider IDs that are not already in the database.';
+    refresh.disabled = state.status === 'running'; refresh.textContent = state.status === 'running' ? 'Refreshing…' : 'Refresh catalog';
+  };
+  const loadSummary = async (): Promise<void> => {
+    const data = await api<DatabaseSummary>('/database/summary');
+    if (view !== 'database') return;
+    clear(counts);
+    const values: Array<[string, number]> = [['Movie streams', data.counts.movies], ['Series streams', data.counts.series],
+      ['Live TV streams', data.counts.liveTv], ['Episodes', data.counts.episodes]];
+    for (const [label, value] of values) {
+      const tile = node('div', 'central-db-count'); tile.append(node('strong', '', value.toLocaleString()), node('span', '', label)); counts.appendChild(tile);
+    }
+    refreshStatus(data.refresh);
+    if (data.refresh.status === 'idle' && data.lastRefreshed) statusMessage.textContent += ` Most recently imported stream: ${new Date(data.lastRefreshed).toLocaleString()}.`;
+    if (data.refresh.status === 'running' && !polling) {
+      polling = true;
+      window.setTimeout(() => { polling = false; if (view === 'database') void loadSummary().catch((error) => { statusMessage.textContent = errorMessage(error); }); }, 2000);
+    }
+  };
+  refresh.onclick = () => {
+    refresh.disabled = true; statusMessage.textContent = 'Starting provider catalog check…';
+    void api<{ refresh: DatabaseSummary['refresh'] }>('/provider/sync', {}).then(() => loadSummary())
+      .catch((error) => { statusMessage.textContent = errorMessage(error); refresh.disabled = false; });
+  };
+  try { await loadSummary(); } catch (error) { statusMessage.textContent = errorMessage(error); }
+}
 function showSearch(): void {
-  const heading = node('h1', 'central-page-title', 'Search'); content.appendChild(heading);
+  const searchPage = node('section', 'central-search-page');
+  const heading = node('h1', 'central-page-title', 'Search'); searchPage.appendChild(heading);
   const input = node('input', 'central-search') as HTMLInputElement; input.type = 'search'; input.placeholder = 'Movies and series';
-  content.appendChild(input);
-  const results = node('div', 'central-grid'); content.appendChild(results);
-  let timer = 0;
+  searchPage.appendChild(input);
+  const results = node('div', 'central-grid central-search-results'); searchPage.appendChild(results);
+  results.addEventListener('scroll', updatePageScrollControls, { passive: true });
+  content.appendChild(searchPage);
+  let timer = 0, resultPage = 0, resultPageSize = 20, currentQuery = '', hasMore = false, searchGeneration = 0, activeSearchRequests = 0;
+  let searchPreloadObserver: IntersectionObserver | null = null;
+  const pageSizeForSevenRows = (): number => {
+    const gridWidth = results.clientWidth || window.innerWidth * .916;
+    const columns = Math.max(1, Math.floor((gridWidth + 13) / 253));
+    return Math.min(80, Math.max(2, columns * 7));
+  };
+  let focusResultsWhenLoaded = false;
+  const loadSearchPage = async (reset: boolean, focusFirstNew = false): Promise<void> => {
+    const query = input.value.trim();
+    if (query.length < 2 || (!reset && activeSearchRequests > 0) || view !== 'search') return;
+    if (reset) {
+      currentQuery = query; resultPage = 0; resultPageSize = pageSizeForSevenRows(); hasMore = false;
+      clear(results);
+    }
+    if (query !== currentQuery) return;
+    const generation = searchGeneration;
+    const nextPage = reset ? 1 : resultPage + 1;
+    const existingCount = results.children.length;
+    activeSearchRequests += 1;
+    try {
+      const data = await api<{ movies: Item[]; series: Item[]; hasMore: boolean }>(`/search?q=${encodeURIComponent(query)}&page=${nextPage}&limit=${resultPageSize}&language=${encodeURIComponent(appLanguage)}`);
+      if (input.value.trim() !== query || view !== 'search' || currentQuery !== query || generation !== searchGeneration) return;
+      const newItems = data.movies.concat(data.series);
+      newItems.forEach((item) => results.appendChild(card(item)));
+      resultPage = nextPage; hasMore = data.hasMore;
+      if (reset) {
+        searchPreloadObserver?.disconnect();
+        const sentinel = node('div', 'central-infinite-sentinel'); sentinel.setAttribute('aria-hidden', 'true'); searchPage.appendChild(sentinel);
+        searchPreloadObserver = new IntersectionObserver((entries) => {
+          if (entries.some((entry) => entry.isIntersecting) && hasMore && !activeSearchRequests) void loadSearchPage(false);
+        }, { rootMargin: '700px 0px' });
+        searchPreloadObserver.observe(sentinel);
+      }
+      setStatus(results.children.length ? '' : 'No results.');
+      if ((focusFirstNew || focusResultsWhenLoaded) && newItems.length) {
+        const firstNew = results.querySelectorAll<HTMLButtonElement>('.central-card')[focusFirstNew ? existingCount : 0];
+        focusResultsWhenLoaded = false;
+        firstNew?.focus(); firstNew?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      }
+    } catch (error) { if (input.value.trim() === query && view === 'search' && generation === searchGeneration) setStatus(errorMessage(error)); }
+    finally { activeSearchRequests = Math.max(0, activeSearchRequests - 1); }
+  };
   input.oninput = () => {
-    window.clearTimeout(timer); const query = input.value.trim(); clear(results);
-    if (query.length < 2) return;
-    timer = window.setTimeout(() => { void (async () => {
-      try {
-        const data = await api<{ movies: Item[]; series: Item[] }>(`/search?q=${encodeURIComponent(query)}&limit=20`);
-        if (input.value.trim() !== query || view !== 'search') return;
-        data.movies.concat(data.series).forEach((item) => results.appendChild(card(item)));
-        setStatus(results.children.length ? '' : 'No results.');
-      } catch (error) { setStatus(errorMessage(error)); }
-    })(); }, 250);
+    searchGeneration += 1;
+    window.clearTimeout(timer); const query = input.value.trim(); clear(results); hasMore = false; resultPage = 0;
+    searchPreloadObserver?.disconnect(); searchPreloadObserver = null;
+    searchPage.querySelector('.central-infinite-sentinel')?.remove();
+    if (query.length < 2) { currentQuery = query; return; }
+    currentQuery = query;
+    timer = window.setTimeout(() => { void loadSearchPage(true); }, 250);
+  };
+  input.onkeydown = (event) => {
+    const keyCode = (event as KeyboardEvent).keyCode;
+    if (event.key === 'Enter' || event.key === 'OK' || keyCode === 13 || keyCode === 23) {
+      event.preventDefault(); event.stopPropagation();
+      const firstResult = results.querySelector<HTMLButtonElement>('.central-card');
+      if (firstResult) { firstResult.focus(); firstResult.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); return; }
+      if (input.value.trim().length >= 2) { focusResultsWhenLoaded = true; window.clearTimeout(timer); if (!activeSearchRequests) void loadSearchPage(true); }
+      return;
+    }
+    if (event.key === 'ArrowUp') {
+      event.preventDefault(); event.stopPropagation();
+      document.querySelector<HTMLButtonElement>('#central-nav [data-view="search"]')?.focus();
+      return;
+    }
+    if (event.key === 'ArrowDown') {
+      event.preventDefault(); event.stopPropagation();
+      const firstResult = results.querySelector<HTMLButtonElement>('.central-card');
+      if (firstResult) { firstResult.focus(); firstResult.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); return; }
+      if (input.value.trim().length >= 2) {
+        focusResultsWhenLoaded = true;
+        window.clearTimeout(timer);
+        if (!activeSearchRequests) void loadSearchPage(true);
+      }
+    }
   };
   input.focus();
 }
 async function openItem(item: Item): Promise<void> {
-  if (item.kind === 'live' || item.kind === 'episode') { await play(item); return; }
+  if (item.kind === 'live') { await play(item); return; }
+  if (item.kind === 'episode') {
+    if (item.seriesId && item.seriesTitle) {
+      await openItem({ kind: 'series', id: item.seriesId, title: item.seriesTitle, posterUrl: item.posterUrl, backdropUrl: item.backdropUrl,
+        highlightEpisodeCanonicalId: item.canonicalId, highlightSeasonNumber: item.seasonNumber });
+      return;
+    }
+    await play(item); return;
+  }
   lastFocus = document.activeElement as HTMLElement;
   restoreCardKey = `${item.kind}:${item.id}`;
+  window.scrollTo({ top: 0, behavior: 'auto' });
   view = 'detail'; clear(content); app.classList.add('detail-open'); setStatus('Loading details…');
   try {
-    const detail = await api<Item>(`/${item.kind === 'movie' ? 'movies' : 'series'}/${item.id}`);
+    const detail = await api<Item>(`/${item.kind === 'movie' ? 'movies' : 'series'}/${item.id}?language=${encodeURIComponent(appLanguage)}`);
     if (view !== 'detail') return;
     currentItem = detail;
     clear(content); setStatus('');
-    const layout = node('section', 'central-detail');
-    if (detail.backdropUrl || detail.posterUrl) { const image = node('img', 'central-detail-backdrop'); image.src = detail.backdropUrl || detail.posterUrl || ''; image.alt = ''; layout.appendChild(image); }
+    const layout = node('section', `central-detail${detail.kind === 'series' ? ' central-series-detail' : ''}`);
+    const selectedCardImage = lastFocus?.querySelector<HTMLImageElement>('img')?.currentSrc || lastFocus?.querySelector<HTMLImageElement>('img')?.src;
+    const detailBackdrops = [...(selectedCardImage ? imageUrls(selectedCardImage) : []),
+      ...imageUrls(item.backdropUrl), ...imageUrls(item.posterUrl), ...imageUrls(detail.backdropUrl), ...imageUrls(detail.posterUrl)];
+    if (detailBackdrops.length) {
+      const image = node('img', 'central-detail-backdrop'); image.alt = ''; let sourceIndex = 0;
+      image.onerror = () => { sourceIndex += 1; if (detailBackdrops[sourceIndex]) image.src = detailBackdrops[sourceIndex]; else image.remove(); };
+      image.src = detailBackdrops[sourceIndex]; layout.appendChild(image);
+    }
+    const detailPosters = [...imageUrls(detail.posterUrl), ...imageUrls(item.posterUrl)];
+    if (detailPosters.length) { const poster = node('img', 'central-detail-poster'); poster.src = detailPosters[0]; poster.alt = `${detail.title} poster`; poster.onerror = () => poster.remove(); layout.appendChild(poster); }
     const body = node('div', 'central-detail-body');
     const back = node('button', 'central-detail-back', '←  Back') as HTMLButtonElement;
     back.onclick = () => backFromDetail(); body.appendChild(back);
     body.appendChild(node('div', 'central-hero-eyebrow', detail.kind === 'series' ? 'SERIES' : 'FILM'));
-    body.appendChild(node('h1', undefined, detail.title));
+    body.appendChild(node('h1', undefined, normalizeDisplayTitle(detail.title)));
     const meta = [detail.releaseYear, detail.genre, detail.durationSeconds ? `${Math.round(detail.durationSeconds / 60)} min` : ''].filter(Boolean).join(' · ');
-    body.appendChild(node('div', 'central-detail-meta', meta)); body.appendChild(node('p', undefined, detail.description || ''));
+    body.appendChild(node('div', 'central-detail-meta', meta));
+    const description = detail.description?.trim() || item.description?.trim();
+    body.appendChild(node('p', undefined, description || (detail.descriptionStatus === 'unavailable'
+      ? 'The description could not be loaded from TMDB. Please try again later.'
+      : `No information is available for this ${detail.kind === 'series' ? 'show' : 'movie'}.`)));
+    let selectedStreamId = item.streamId || detail.streamId || detail.id;
+    let languagePicker: HTMLElement | null = null;
+    if (detail.kind === 'movie' && (detail.streams?.length ?? 0) > 0) {
+      const languageStreams = detail.streams!;
+      const rememberedStream = item.streamId ? languageStreams.find((stream) => (stream.providerId || stream.id) === item.streamId) : undefined;
+      const languageName = (stream: NonNullable<Item['streams']>[number]): string =>
+        stream.language?.trim() || (stream.languageCode && stream.languageCode !== 'und' ? stream.languageCode.toUpperCase() : 'Unlabelled');
+      const orderedLanguageStreams = rememberedStream ? [rememberedStream, ...languageStreams.filter((stream) => stream !== rememberedStream)] : languageStreams;
+      const distinctStreams = orderedLanguageStreams.filter((stream, index, all) => all.findIndex((candidate) =>
+        (candidate.languageCode || candidate.language || 'und').toLowerCase() === (stream.languageCode || stream.language || 'und').toLowerCase()) === index);
+      const selectedStream = languageStreams.find((stream) => (stream.providerId || stream.id) === selectedStreamId) ?? languageStreams[0];
+      languagePicker = node('div', 'central-language-block');
+      if (distinctStreams.length > 1) {
+        const picker = node('label', 'central-category-picker movie-language-picker');
+        picker.appendChild(node('span', '', 'Play version'));
+        const select = node('select', 'central-category-select') as HTMLSelectElement;
+        distinctStreams.forEach((stream) => {
+          const streamId = stream.providerId || stream.id;
+          select.appendChild(new Option(languageName(stream), streamId));
+        });
+        select.value = distinctStreams.some((stream) => (stream.providerId || stream.id) === selectedStreamId)
+          ? selectedStreamId : (distinctStreams[0].providerId || distinctStreams[0].id);
+        selectedStreamId = select.value;
+        const selectedInfo = node('small', 'central-language-selected');
+        const otherInfo = node('small', 'central-language-alternates');
+        const updateLanguageInfo = (): void => {
+          const current = distinctStreams.find((stream) => (stream.providerId || stream.id) === selectedStreamId) ?? distinctStreams[0];
+          const currentKey = (current.languageCode || current.language || 'und').toLowerCase();
+          const alternates = distinctStreams.filter((stream) => (stream.languageCode || stream.language || 'und').toLowerCase() !== currentKey).map(languageName);
+          selectedInfo.textContent = `This stream will play in ${languageName(current)}.`;
+          otherInfo.textContent = alternates.length ? `Other available languages: ${alternates.join(', ')}.` : 'No other language versions are available.';
+        };
+        select.onchange = () => { selectedStreamId = select.value; updateLanguageInfo(); };
+        picker.appendChild(select); languagePicker.appendChild(picker);
+        const languageInfo = node('div', 'central-language-details');
+        languageInfo.append(selectedInfo, otherInfo); languagePicker.appendChild(languageInfo);
+        updateLanguageInfo();
+      } else {
+        const onlyLanguage = languageName(selectedStream);
+        languagePicker.appendChild(node('small', 'central-language-selected', `This stream will play in ${onlyLanguage}.`));
+        languagePicker.appendChild(node('small', 'central-language-alternates', 'No other language versions are available.'));
+      }
+    }
     const actions = node('div', 'central-detail-actions');
     if (detail.kind === 'movie') {
       const playButton = node('button', 'primary', watched.has(`movie:${detail.id}`) ? '▶  Resume' : '▶  Play') as HTMLButtonElement;
-      playButton.onclick = () => void play(detail); actions.appendChild(playButton);
+      playButton.onclick = () => void play({ ...detail, streamId: selectedStreamId }); actions.appendChild(playButton);
     }
     let saved = favorites.has(`${detail.kind}:${detail.id}`);
     const favorite = node('button', 'secondary', saved ? '✓  In My List' : '＋  My List') as HTMLButtonElement;
@@ -287,73 +1277,135 @@ async function openItem(item: Item): Promise<void> {
       saved = !saved;
       try { await api(`/profiles/${profile.id}/my-list`, { kind: detail.kind, id: detail.id, saved });
         if (saved) favorites.add(`${detail.kind}:${detail.id}`); else favorites.delete(`${detail.kind}:${detail.id}`);
-        favorite.textContent = saved ? '✓  In My List' : '＋  My List'; }
+        favorite.textContent = saved ? '✓  In My List' : '＋  My List'; invalidateHomeCache(); }
       catch (error) { saved = !saved; setStatus(errorMessage(error)); }
     })();
     actions.appendChild(favorite); body.appendChild(actions);
-    body.appendChild(node('div', 'central-detail-audio', detail.metadata?.language ? `Language: ${detail.metadata.language}` : 'Audio and subtitle options appear during playback.'));
+    if (languagePicker) body.appendChild(languagePicker);
+    if (detail.kind !== 'movie') body.appendChild(node('div', 'central-detail-audio', detail.metadata?.language ? `Language: ${detail.metadata.language}` : 'Audio and subtitle options appear during playback.'));
     layout.appendChild(body); content.appendChild(layout);
-    if (detail.kind === 'series') await showEpisodes(detail.id);
-    (body.querySelector<HTMLButtonElement>('.primary') ?? back).focus();
+    if (detail.kind === 'series') await showEpisodes(detail.id, layout, item.highlightEpisodeCanonicalId, item.highlightSeasonNumber);
+    const highlightedEpisode = content.querySelector<HTMLButtonElement>('.central-episode[data-new-episode="true"]');
+    (highlightedEpisode ?? body.querySelector<HTMLButtonElement>('.primary') ?? back).focus();
   } catch (error) { setStatus(errorMessage(error)); }
 }
-async function showEpisodes(seriesId: string): Promise<void> {
+async function showEpisodes(seriesId: string, parent: HTMLElement, highlightEpisodeCanonicalId?: string, highlightSeasonNumber?: number): Promise<void> {
   try {
     const data = await api<{ seasons: Array<{ number: number; count: number }> }>(`/series/${seriesId}/seasons`);
     if (view !== 'detail' || currentItem?.id !== seriesId) return;
-    const picker = node('div', 'central-season-picker');
-    const episodes = node('section', 'central-row');
+    const browser = node('section', 'central-series-browser');
+    const picker = node('nav', 'central-season-picker');
+    picker.setAttribute('aria-label', 'Seasons');
+    const episodes = node('section', 'central-episode-container');
+    episodes.setAttribute('aria-label', 'Episodes');
+    let selectedSeason = data.seasons.find((season) => season.number === highlightSeasonNumber)?.number ?? data.seasons[0]?.number;
     for (const season of data.seasons) {
       const button = node('button', 'central-more', `Season ${season.number} (${season.count})`) as HTMLButtonElement;
-      button.onclick = () => { clear(episodes); void loadEpisodePage(seriesId, season.number, 1, episodes); };
+      button.type = 'button';
+      button.setAttribute('aria-pressed', `${season.number === selectedSeason}`);
+      button.onclick = () => {
+        selectedSeason = season.number;
+        picker.querySelectorAll<HTMLButtonElement>('button').forEach((candidate) => candidate.setAttribute('aria-pressed', `${candidate === button}`));
+        clear(episodes); void loadEpisodePage(seriesId, season.number, 1, episodes);
+      };
       picker.appendChild(button);
     }
-    content.appendChild(picker); content.appendChild(episodes);
-    if (data.seasons.length) await loadEpisodePage(seriesId, data.seasons[0].number, 1, episodes);
-    if (!data.seasons.length) content.appendChild(node('p', undefined, 'Episodes are still syncing. Please check again shortly.'));
+    browser.append(picker, episodes); parent.appendChild(browser);
+    if (data.seasons.length && selectedSeason !== undefined) {
+      const selectedSeasonButton = Array.from(picker.querySelectorAll<HTMLButtonElement>('button')).find((button) => button.getAttribute('aria-pressed') === 'true');
+      if (selectedSeasonButton) selectedSeasonButton.scrollIntoView({ block: 'nearest' });
+      await loadEpisodePage(seriesId, selectedSeason, 1, episodes, highlightEpisodeCanonicalId);
+    }
+    if (!data.seasons.length) episodes.appendChild(node('p', 'central-episodes-empty', 'Episodes are still syncing. Please check again shortly.'));
   } catch (error) { setStatus(errorMessage(error)); }
 }
-async function loadEpisodePage(seriesId: string, season: number, episodePage: number, target: HTMLElement): Promise<void> {
+async function loadEpisodePage(seriesId: string, season: number, episodePage: number, target: HTMLElement, highlightEpisodeCanonicalId?: string): Promise<void> {
   try {
-    const result = await api<{ items: Item[]; hasMore: boolean }>(`/series/${seriesId}/seasons/${season}/episodes?page=${episodePage}&limit=20`);
+    const result = await api<{ items: Item[]; hasMore: boolean }>(`/series/${seriesId}/seasons/${season}/episodes?page=${episodePage}&limit=20&language=${encodeURIComponent(appLanguage)}`);
     if (view !== 'detail' || currentItem?.id !== seriesId) return;
-    if (episodePage === 1) { clear(target); target.appendChild(node('h2', undefined, `Season ${season}`)); }
+    if (episodePage === 1) clear(target);
+    let foundHighlightedEpisode = false;
     for (const episode of result.items) {
       const button = node('button', 'central-episode', `${episode.episodeNumber ?? ''}. ${episode.title}`) as HTMLButtonElement;
+      if (highlightEpisodeCanonicalId && episode.canonicalId === highlightEpisodeCanonicalId) {
+        button.dataset.newEpisode = 'true'; button.classList.add('central-episode-new'); foundHighlightedEpisode = true;
+      }
       if (episode.description) button.appendChild(node('small', undefined, episode.description));
       button.onclick = () => void play({ ...episode, kind: 'episode' }); target.appendChild(button);
     }
+    const existingLoader = target.querySelector<HTMLElement>('.central-episode-sentinel');
+    existingLoader?.remove();
+    if (result.hasMore && highlightEpisodeCanonicalId && !foundHighlightedEpisode) {
+      await loadEpisodePage(seriesId, season, episodePage + 1, target, highlightEpisodeCanonicalId);
+      return;
+    }
     if (result.hasMore) {
-      const more = node('button', 'central-more', 'More episodes') as HTMLButtonElement;
-      more.onclick = () => { more.remove(); void loadEpisodePage(seriesId, season, episodePage + 1, target); };
-      target.appendChild(more);
+      const sentinel = node('div', 'central-infinite-sentinel central-episode-sentinel'); target.appendChild(sentinel);
+      const observer = new IntersectionObserver((entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) { observer.disconnect(); sentinel.remove(); void loadEpisodePage(seriesId, season, episodePage + 1, target); }
+      }, { root: target, rootMargin: '500px 0px' });
+      observer.observe(sentinel);
     }
   } catch (error) { setStatus(errorMessage(error)); }
 }
 function backFromDetail(): void { navigate(previousView); }
-async function play(item: Item, liveFormat: 'm3u8' | 'ts' = 'm3u8'): Promise<void> {
+async function play(item: Item, liveFormat: 'm3u8' | 'ts' = 'm3u8', resumeAt?: number, sourceOverride?: string, forceVideoTranscode = false): Promise<void> {
   try {
+    let playableItem = item;
+    // Featured and shelf cards only carry compact catalog metadata. Hydrate the
+    // movie once so the in-player language menu has the same provider variants
+    // that are shown on its detail page.
+    if (item.kind === 'movie' && !item.streams?.length) {
+      try {
+        const detail = await api<Item>(`/movies/${item.id}?language=${encodeURIComponent(appLanguage)}`);
+        playableItem = { ...item, ...detail, id: item.id, streamId: item.streamId || detail.streamId };
+      } catch { /* Keep direct playback available if metadata lookup fails. */ }
+    } else if (item.kind === 'episode' && !item.streams?.length) {
+      try {
+        const variants = await api<{ items: NonNullable<Item['streams']> }>(`/episodes/${item.streamId ?? item.id}/streams?language=${encodeURIComponent(appLanguage)}`);
+        playableItem = { ...item, streams: variants.items, streamId: item.streamId ?? item.id };
+      } catch { /* Keep episode playback available if the variant lookup fails. */ }
+    }
+    if (playableItem.kind === 'live') livePreviewGeneration += 1;
+    if (video.parentElement !== player) player.insertBefore(video, player.firstChild);
+    video.classList.remove('central-inline-video');
+    playingItem = playableItem;
+    player.classList.toggle('live-playback', playableItem.kind === 'live');
+    updatePlayerOptionVisibility();
+    clearExternalSubtitle();
     playerStatus.textContent = 'Resolving stream…';
-    const resolved = await api<{ url: string }>(`/playback/resolve`, { kind: item.kind, id: item.id, format: item.kind === 'live' ? liveFormat : undefined });
-    const stream = new URL(resolved.url);
-    if (!['http:', 'https:'].includes(stream.protocol)) throw new Error('Unsupported stream URL.');
-    playingItem = item; lastProgressSave = 0; activeLiveFormat = liveFormat;
-    el('central-playing-title').textContent = item.title;
+    el('central-playing-title').textContent = normalizeDisplayTitle(playableItem.title);
     player.classList.remove('hidden');
-    video.src = resolved.url;
+    revealPlayerControls();
+    let sourceUrl: string;
+    const requiresRemux = playableItem.kind !== 'live' && ['mkv', 'avi', 'wmv', 'flv', 'mov', 'ts', 'mpeg', 'mpg'].includes((playableItem.streams?.find((stream) => stream.id === (playableItem.streamId ?? playableItem.id))?.extension ?? (playableItem as Item & { streamExtension?: string }).streamExtension ?? '').toLowerCase().replace(/^\./, ''));
+    activeRemuxMode = requiresRemux ? (forceVideoTranscode ? 'transcode' : 'copy') : null;
+    remuxTranscodeAttempted = forceVideoTranscode;
+    if (sourceOverride) sourceUrl = sourceOverride;
+    else if (requiresRemux) {
+      const ticket = await api<{ url: string }>('/playback/remux-ticket', { kind: playableItem.kind, id: playableItem.streamId ?? playableItem.id, transcode: forceVideoTranscode });
+      sourceUrl = `${config!.url}${ticket.url}`;
+    }
+    else sourceUrl = (await api<{ url: string }>(`/playback/resolve`, { kind: playableItem.kind, id: playableItem.streamId ?? playableItem.id, format: playableItem.kind === 'live' ? liveFormat : undefined })).url;
+    const stream = new URL(sourceUrl);
+    if (!['http:', 'https:'].includes(stream.protocol)) throw new Error('Unsupported stream URL.');
+    lastProgressSave = 0; activeLiveFormat = liveFormat;
+    playerStatus.textContent = 'Buffering…';
+    video.src = sourceUrl;
     video.load();
     updatePlaybackProgress();
-    const position = watched.get(`${item.kind}:${item.id}`) ?? item.positionSeconds ?? 0;
+    const position = resumeAt ?? watched.get(`${playableItem.kind}:${playableItem.id}`) ?? playableItem.positionSeconds ?? 0;
     video.onloadedmetadata = () => {
       if (position > 0) { try { video.currentTime = position; } catch { /* Live streams may not seek. */ } }
       updatePlaybackProgress();
+      updatePlayerOptionVisibility();
     };
     await video.play();
-    playerStatus.textContent = '';
+    revealPlayerControls();
     el<HTMLButtonElement>('central-play-pause').focus();
   } catch (error) {
     if (item.kind === 'live' && liveFormat === 'm3u8' && errorMessage(error).includes('HTTP 422')) { await play(item, 'ts'); return; }
-    playerStatus.textContent = errorMessage(error); setStatus(errorMessage(error));
+    playerStatus.textContent = errorMessage(error); revealPlayerControls();
   }
 }
 async function saveProgress(completed = false): Promise<void> {
@@ -361,93 +1413,418 @@ async function saveProgress(completed = false): Promise<void> {
   const positionSeconds = Number.isFinite(video.currentTime) ? Math.max(0, Math.floor(video.currentTime)) : 0;
   const durationSeconds = Number.isFinite(video.duration) ? Math.floor(video.duration) : undefined;
   watched.set(`${playingItem.kind}:${playingItem.id}`, positionSeconds);
-  try { await api(`/profiles/${profile.id}/progress`, { kind: playingItem.kind, id: playingItem.id, positionSeconds, durationSeconds, completed }); }
+  try { await api(`/profiles/${profile.id}/progress`, { kind: playingItem.kind, id: playingItem.id, positionSeconds, durationSeconds, completed }); invalidateHomeCache(); }
   catch { /* Playback continues if progress cannot be saved. */ }
 }
 function closePlayer(save = true): void {
   if (player.classList.contains('hidden')) return;
-  if (save) void saveProgress(); video.pause(); video.removeAttribute('src'); video.load(); player.classList.add('hidden');
-  playingItem = null; lastFocus?.focus();
+  const liveItemToPreview = playingItem?.kind === 'live' && view === 'live' && content.querySelector('.central-live-preview') ? playingItem : null;
+  window.clearTimeout(playerControlsTimer); player.classList.remove('controls-hidden');
+  el('central-player-stream-menu').classList.add('hidden');
+  if (document.fullscreenElement === player) void document.exitFullscreen().catch(() => undefined);
+  if (save && !liveItemToPreview) void saveProgress();
+  if (!liveItemToPreview) { video.pause(); video.removeAttribute('src'); video.load(); }
+  player.classList.add('hidden'); clearExternalSubtitle();
+  playingItem = null;
+  if (liveItemToPreview) {
+    const preview = content.querySelector<HTMLElement>('.central-live-preview');
+    if (preview) { video.classList.add('central-inline-video'); video.classList.remove('central-inline-playing'); preview.appendChild(video); livePreviewLoader?.(liveItemToPreview); }
+  }
+  lastFocus?.focus();
 }
 function showProfiles(): void {
-  content.appendChild(node('h1', undefined, 'Choose a profile'));
+  const panel = node('section', 'central-profile-picker');
+  panel.appendChild(node('h1', undefined, 'Choose a profile'));
+  const choices = node('div', 'central-profile-choices');
   for (const choice of profiles) {
-    const button = node('button', 'central-more', choice.name) as HTMLButtonElement;
-    button.onclick = () => { profile = choice; watched.clear(); favorites.clear(); localStorage.setItem('streamcinema.profile', choice.id); profileButton.textContent = choice.name; navigate('home'); };
-    content.appendChild(button);
+    const button = node('button', 'central-profile-choice', choice.name) as HTMLButtonElement;
+    button.onclick = () => { profile = choice; watched.clear(); favorites.clear(); invalidateCatalogCache(); localStorage.setItem('streamcinema.profile', choice.id); renderProfileButton(); navigate('home'); window.setTimeout(() => { void preloadBrowseScreens(); }, 0); };
+    choices.appendChild(button);
   }
-  const input = node('input', 'central-search') as HTMLInputElement; input.placeholder = 'New profile name'; input.maxLength = 24;
-  content.appendChild(input);
-  const add = node('button', 'central-more', 'Create profile') as HTMLButtonElement;
-  add.onclick = () => void (async () => {
-    try { const next = await api<Profile>('/profiles', { name: input.value.trim() }); profiles.push(next); profile = next; localStorage.setItem('streamcinema.profile', next.id); profileButton.textContent = next.name; navigate('home'); }
-    catch (error) { setStatus(errorMessage(error)); }
-  })(); content.appendChild(add);
+  panel.appendChild(choices);
+  const create = node('form', 'central-profile-create') as HTMLFormElement;
+  const input = node('input', 'central-profile-input') as HTMLInputElement; input.placeholder = 'New profile name'; input.maxLength = 24;
+  const add = node('button', 'central-profile-add', 'Create profile') as HTMLButtonElement; add.type = 'submit';
+  create.append(input, add); panel.appendChild(create);
+  create.onsubmit = (event) => { event.preventDefault();
+    void (async () => {
+      try { const next = await api<Profile>('/profiles', { name: input.value.trim() }); profiles.push(next); profile = next; invalidateCatalogCache(); localStorage.setItem('streamcinema.profile', next.id); renderProfileButton(); navigate('home'); window.setTimeout(() => { void preloadBrowseScreens(); }, 0); }
+      catch (error) { setStatus(errorMessage(error)); }
+    })();
+  };
+  content.appendChild(panel);
 }
 async function showSettings(): Promise<void> {
   const panel = node('section', 'central-settings'); panel.appendChild(node('h1', undefined, 'Settings'));
   panel.appendChild(node('p', undefined, `Server: ${config?.url ?? ''}`));
+  let openSubtitlesStatus!: HTMLElement;
+  let openSubtitlesForm!: HTMLFormElement;
   panel.appendChild(node('h2', undefined, 'Xtream provider'));
-  panel.appendChild(node('p', undefined, 'Credentials stay in this local server process and are not saved to the browser or source files. The provider URL is HTTP; use its HTTPS address if available to encrypt login and stream traffic.'));
+  panel.appendChild(node('p', undefined, 'Credentials are encrypted in the server database and used by the server for playback. Saving credentials does not contact the provider or import the catalog.'));
   const form = node('form', 'provider-form') as HTMLFormElement;
-  const providerUrl = node('input', 'central-search') as HTMLInputElement; providerUrl.type = 'url'; providerUrl.value = 'http://line.darktv-pro.cc'; providerUrl.required = true; providerUrl.setAttribute('aria-label', 'Xtream server URL');
-  const providerUser = node('input', 'central-search') as HTMLInputElement; providerUser.type = 'text'; providerUser.value = 'e05320739c'; providerUser.autocomplete = 'off'; providerUser.required = true; providerUser.setAttribute('aria-label', 'Xtream username');
+  const providerUrl = node('input', 'central-search') as HTMLInputElement; providerUrl.type = 'url'; providerUrl.required = true; providerUrl.placeholder = 'https://provider.example'; providerUrl.setAttribute('aria-label', 'Xtream server URL');
+  const providerUser = node('input', 'central-search') as HTMLInputElement; providerUser.type = 'text'; providerUser.autocomplete = 'off'; providerUser.required = true; providerUser.setAttribute('aria-label', 'Xtream username');
   const providerPass = node('input', 'central-search') as HTMLInputElement; providerPass.type = 'password'; providerPass.autocomplete = 'new-password'; providerPass.required = true; providerPass.setAttribute('aria-label', 'Xtream password');
-  const connectProvider = node('button', 'central-more', 'Connect and sync') as HTMLButtonElement; connectProvider.type = 'submit';
-  const providerMessage = node('p', 'provider-message', 'Enter your provider password to connect.');
+  const connectProvider = node('button', 'central-more', 'Save credentials') as HTMLButtonElement; connectProvider.type = 'submit';
+  const providerMessage = node('p', 'provider-message', 'Your credentials will be stored securely. No catalog sync will start from this screen.');
+  void api<{ configured: boolean }>('/provider/status').then(({ configured }) => {
+    providerMessage.textContent = configured ? 'Xtream credentials are saved. Enter new values below to replace them.' : 'Add your Xtream provider here. Credentials are stored securely; saving them will not start a catalog sync.';
+  }).catch(() => undefined);
   form.append(node('label', undefined, 'Server URL'), providerUrl, node('label', undefined, 'Username'), providerUser,
     node('label', undefined, 'Password'), providerPass, connectProvider, providerMessage);
   form.onsubmit = (event) => {
-    event.preventDefault(); connectProvider.disabled = true; providerMessage.textContent = 'Checking login…';
-    void (async () => {
-      try {
-        const result = await api<{ connected: boolean }>(`/provider/connect`, { baseUrl: providerUrl.value.trim(), username: providerUser.value.trim(), password: providerPass.value });
-        providerPass.value = ''; providerMessage.textContent = 'Connected. Catalog sync is running…';
-        const deadline = Date.now() + 180_000;
-        while (Date.now() < deadline && view === 'settings') {
-          await new Promise((resolve) => window.setTimeout(resolve, 2000));
-          const status = await api<{ status: string; lastError?: string; rowCount?: number }>('/provider/status');
-          if (status.status === 'success') { providerMessage.textContent = `Catalog ready: ${status.rowCount || 0} items.`; connectProvider.disabled = false; return; }
-          if (status.status === 'error') throw new Error(status.lastError || 'Catalog sync failed.');
-        }
-        if (view === 'settings') providerMessage.textContent = 'Still syncing. Check Sync status below in a moment.';
-        void result;
-      } catch (error) { providerMessage.textContent = errorMessage(error); }
-      finally { connectProvider.disabled = false; }
-    })();
+    event.preventDefault(); connectProvider.disabled = true; providerMessage.textContent = 'Saving credentials securely…';
+    void api<{ connected: boolean; catalogSyncStarted: boolean }>(`/provider/connect`, { baseUrl: providerUrl.value.trim(), username: providerUser.value.trim(), password: providerPass.value })
+      .then(() => { providerPass.value = ''; providerMessage.textContent = 'Credentials saved. No provider catalog sync was started.'; })
+      .catch((error) => { providerMessage.textContent = errorMessage(error); })
+      .finally(() => { connectProvider.disabled = false; });
   };
   panel.appendChild(form);
-  const syncNow = node('button', 'central-more', 'Sync now') as HTMLButtonElement;
-  syncNow.onclick = () => void api('/provider/sync', {}).then(() => { sync.textContent = 'Catalog synchronization started.'; }).catch((error) => { sync.textContent = errorMessage(error); });
-  panel.appendChild(syncNow);
-  const sync = node('p', undefined, 'Loading sync status…'); panel.appendChild(sync);
+  const sync = node('p', undefined, 'Loading catalog status…'); panel.appendChild(sync);
+  panel.appendChild(node('h2', undefined, 'Home discovery'));
+  const tmdbStatus = node('p', undefined, 'Checking TMDB configuration…'); panel.appendChild(tmdbStatus);
+  {
+    const tmdbForm = node('form', 'provider-form') as HTMLFormElement;
+    const tmdbToken = node('input', 'central-search') as HTMLInputElement; tmdbToken.type = 'password'; tmdbToken.autocomplete = 'off'; tmdbToken.placeholder = 'TMDB API key or Read Access Token'; tmdbToken.setAttribute('aria-label', 'TMDB API key or Read Access Token');
+    const saveTmdb = node('button', 'central-more', 'Save TMDB token') as HTMLButtonElement; saveTmdb.type = 'submit';
+    const tmdbMessage = node('p', 'provider-message', 'The token is sent to the server over this connection and stored encrypted in its database. It is never stored in the browser or written to Git.');
+    tmdbForm.append(node('label', undefined, 'TMDB API key or Read Access Token'), tmdbToken, saveTmdb, tmdbMessage);
+    tmdbForm.onsubmit = (event) => {
+      event.preventDefault(); saveTmdb.disabled = true;
+      void api<{ configured: boolean }>('/tmdb/config', { token: tmdbToken.value }).then((result) => {
+        tmdbToken.value = ''; tmdbMessage.textContent = result.configured ? 'TMDB token saved securely. Reloading home…' : 'TMDB token cleared.';
+        invalidateCatalogCache();
+        navigate('home');
+        window.setTimeout(() => { void preloadBrowseScreens(); }, 0);
+      }).catch((error) => { tmdbMessage.textContent = errorMessage(error); }).finally(() => { saveTmdb.disabled = false; });
+    };
+    panel.appendChild(tmdbForm);
+  }
+  panel.appendChild(node('h2', undefined, 'Subtitles'));
+  panel.appendChild(node('h3', undefined, 'Subtitle search preferences'));
+  const subtitleLanguagePicker = node('div', 'central-subtitle-language-preferences');
+  subtitleLanguagePicker.appendChild(node('p', 'central-subtitle-language-label', 'Preferred subtitle languages (select all that apply)'));
+  const subtitleLanguageOptions = node('div', 'central-subtitle-language-options');
+  const selectedSubtitleLanguages = new Set(subtitleSearchLanguages);
+  const subtitlePreferenceMessage = node('p', 'provider-message', 'Subtitle search will offer only the languages selected here.');
+  const renderSubtitlePreferenceMessage = (): void => {
+    const names = availableLanguages.filter(({ code }) => selectedSubtitleLanguages.has(code)).map(({ name }) => name);
+    subtitlePreferenceMessage.textContent = names.length ? `Subtitle search languages: ${names.join(', ')}.` : 'Select at least one subtitle language.';
+  };
+  availableLanguages.forEach(({ code, name }) => {
+    const option = node('label', 'provider-hearing-preference');
+    const checkbox = node('input') as HTMLInputElement; checkbox.type = 'checkbox'; checkbox.checked = selectedSubtitleLanguages.has(code);
+    checkbox.onchange = () => {
+      if (checkbox.checked) selectedSubtitleLanguages.add(code);
+      else if (selectedSubtitleLanguages.size > 1) selectedSubtitleLanguages.delete(code);
+      else { checkbox.checked = true; return; }
+      subtitleSearchLanguages = availableLanguages.filter((language) => selectedSubtitleLanguages.has(language.code)).map((language) => language.code);
+      localStorage.setItem('streamcinema.subtitle-languages', JSON.stringify(subtitleSearchLanguages));
+      renderSubtitlePreferenceMessage();
+    };
+    option.append(checkbox, document.createTextNode(name)); subtitleLanguageOptions.appendChild(option);
+  });
+  renderSubtitlePreferenceMessage(); subtitleLanguagePicker.appendChild(subtitleLanguageOptions);
+  const hearingPreference = node('label', 'provider-hearing-preference') as HTMLLabelElement;
+  const hearingCheckbox = node('input') as HTMLInputElement; hearingCheckbox.type = 'checkbox'; hearingCheckbox.checked = preferHearingImpairedSubtitles;
+  hearingCheckbox.onchange = () => { preferHearingImpairedSubtitles = hearingCheckbox.checked; localStorage.setItem('streamcinema.subtitle-hearing-impaired', String(preferHearingImpairedSubtitles)); };
+  hearingPreference.append(hearingCheckbox, document.createTextNode('Prefer SDH / hearing-impaired subtitles in search results'));
+  panel.append(subtitleLanguagePicker, hearingPreference, subtitlePreferenceMessage);
+  openSubtitlesStatus = node('p', undefined, 'Checking OpenSubtitles configuration…');
+  {
+    const subtitlesForm = node('form', 'provider-form') as HTMLFormElement; openSubtitlesForm = subtitlesForm;
+    const apiKey = node('input', 'central-search') as HTMLInputElement; apiKey.type = 'password'; apiKey.autocomplete = 'off'; apiKey.placeholder = 'OpenSubtitles API key'; apiKey.setAttribute('aria-label', 'OpenSubtitles API key');
+    const saveKey = node('button', 'central-more', 'Save OpenSubtitles key') as HTMLButtonElement; saveKey.type = 'submit';
+    const message = node('p', 'provider-message', 'The API key is sent to the server and stored encrypted. Subtitle search uses the OpenSubtitles REST API.');
+    subtitlesForm.append(node('label', undefined, 'OpenSubtitles API key'), apiKey, saveKey, message);
+    subtitlesForm.onsubmit = (event) => {
+      event.preventDefault(); saveKey.disabled = true; message.textContent = 'Saving key securely…';
+      void api<{ configured: boolean }>('/opensubtitles/config', { apiKey: apiKey.value.trim() })
+        .then((result) => { apiKey.value = ''; message.textContent = result.configured ? 'OpenSubtitles API key saved securely.' : 'OpenSubtitles API key removed.'; openSubtitlesStatus.textContent = result.configured ? 'OpenSubtitles is configured.' : 'OpenSubtitles is not configured.'; })
+        .catch((error) => { message.textContent = errorMessage(error); })
+        .finally(() => { saveKey.disabled = false; });
+    };
+  }
+  const aboutHeading = node('h2', undefined, 'About & credits'); panel.appendChild(aboutHeading);
+  const credits = node('div', 'central-tmdb-credits');
+  const tmdbLink = document.createElement('a'); tmdbLink.href = 'https://www.themoviedb.org'; tmdbLink.target = '_blank'; tmdbLink.rel = 'noopener noreferrer'; tmdbLink.setAttribute('aria-label', 'The Movie Database');
+  const tmdbLogo = node('img'); tmdbLogo.src = 'https://www.themoviedb.org/assets/2/v4/logos/v2/blue_square_2-d537fb228cf3ded904ef09b136fe3fec72548ebc1fea3fbbd1ad9e36364db38b.svg'; tmdbLogo.alt = 'TMDB'; tmdbLink.appendChild(tmdbLogo); credits.appendChild(tmdbLink);
+  credits.appendChild(node('p', '', 'This product uses the TMDB API but is not endorsed or certified by TMDB.'));
+  panel.appendChild(credits);
   const reconnect = node('button', undefined, 'Change server') as HTMLButtonElement;
   reconnect.onclick = () => { localStorage.removeItem('streamcinema.config'); location.href = location.pathname; };
-  panel.appendChild(reconnect); content.appendChild(panel);
+  panel.appendChild(reconnect);
+  const initialChildren = Array.from(panel.children);
+  const settingsTitle = initialChildren[0] as HTMLElement;
+  const serverSummary = initialChildren[1] as HTMLElement;
+  panel.replaceChildren(settingsTitle, serverSummary);
+  const layout = node('div', 'central-settings-layout');
+  const sidebar = node('nav', 'central-settings-sidebar'); sidebar.setAttribute('aria-label', 'Settings categories');
+  const pageHost = node('div', 'central-settings-pages');
+  const pageById = new Map<string, HTMLElement>();
+  const navById = new Map<string, HTMLButtonElement>();
+  let activeSettingsPage = 'preferences-subtitles';
+  const makeGroup = (label: string): void => { sidebar.appendChild(node('div', 'central-settings-group-label', label)); };
+  const makePage = (id: string, label: string): HTMLElement => {
+    const navButton = node('button', 'central-settings-nav-item', label) as HTMLButtonElement;
+    navButton.type = 'button'; navButton.dataset.settingsPage = id; navButton.setAttribute('aria-current', 'false');
+    const pageElement = node('section', 'central-settings-page'); pageElement.dataset.settingsPanel = id;
+    navButton.onclick = () => selectSettingsPage(id);
+    sidebar.appendChild(navButton); pageHost.appendChild(pageElement); pageById.set(id, pageElement); navById.set(id, navButton);
+    return pageElement;
+  };
+  makeGroup('Preferences');
+  const subtitlesPage = makePage('preferences-subtitles', 'Subtitles');
+  const liveCategoriesPage = makePage('preferences-live', 'Live TV categories');
+  makeGroup('Credentials');
+  const xtreamPage = makePage('credentials-xtream', 'Xtream provider');
+  const tmdbPage = makePage('credentials-tmdb', 'TMDB API key');
+  const openSubtitlesPage = makePage('credentials-opensubtitles', 'OpenSubtitles API key');
+  makeGroup('Account');
+  const databasePage = makePage('database-information', 'Database information');
+  const logoutPage = makePage('account-logout', 'Log out');
+  function selectSettingsPage(id: string): void {
+    activeSettingsPage = id;
+    for (const [pageId, pageElement] of pageById) {
+      pageElement.hidden = pageId !== id;
+      navById.get(pageId)?.setAttribute('aria-current', pageId === id ? 'page' : 'false');
+    }
+    if (id === 'database-information') void updateDatabaseSummary().catch((error) => { databaseRefreshStatus.textContent = errorMessage(error); });
+  }
+  let currentPage: HTMLElement | null = null;
+  for (const child of initialChildren.slice(2)) {
+    if (child === openSubtitlesStatus || child === openSubtitlesForm) continue;
+    if (child === aboutHeading) {
+      currentPage = openSubtitlesPage;
+      openSubtitlesPage.append(openSubtitlesStatus, openSubtitlesForm);
+      const about = node('h3', undefined, 'About & credits'); openSubtitlesPage.appendChild(about);
+      continue;
+    }
+    if (child instanceof HTMLHeadingElement && child.tagName === 'H2') {
+      const label = child.textContent?.trim();
+      if (label === 'Xtream provider') currentPage = xtreamPage;
+      else if (label === 'Home discovery') { currentPage = tmdbPage; child.textContent = 'TMDB API key'; }
+      else if (label === 'Subtitles') currentPage = subtitlesPage;
+    }
+    currentPage?.appendChild(child);
+  }
+  logoutPage.append(node('h2', undefined, 'Log out'), node('p', undefined, 'Sign out of NightOwl on this device. You will need your username and password to sign in again.'));
+  const logoutButton = node('button', 'central-more', 'Log out') as HTMLButtonElement;
+  logoutButton.onclick = () => {
+    logoutButton.disabled = true;
+    void (async () => {
+      try { await api('/auth/logout', {}); } catch { /* Clear this browser session even if the server cannot be reached. */ }
+      localStorage.removeItem('streamcinema.config');
+      location.reload();
+    })();
+  };
+  logoutPage.appendChild(logoutButton);
+  databasePage.append(node('h2', undefined, 'Database information'), node('p', 'central-db-note', 'Active stream and episode totals in the NightOwl catalog.'));
+  const databaseCounts = node('div', 'central-db-counts');
+  const databaseRefresh = node('button', 'central-more central-db-refresh', 'Refresh catalog') as HTMLButtonElement;
+  const databaseRefreshStatus = node('p', 'central-db-note', 'Loading catalog information…');
+  databasePage.append(databaseCounts, databaseRefresh, databaseRefreshStatus);
+  const updateDatabaseSummary = async (): Promise<void> => {
+    const data = await api<DatabaseSummary>('/database/summary');
+    if (view !== 'settings' || activeSettingsPage !== 'database-information') return;
+    clear(databaseCounts);
+    const values: Array<[string, number]> = [['Movie streams', data.counts.movies], ['Series streams', data.counts.series],
+      ['Live TV streams', data.counts.liveTv], ['Episodes', data.counts.episodes]];
+    for (const [label, value] of values) {
+      const tile = node('div', 'central-db-count'); tile.append(node('strong', '', value.toLocaleString()), node('span', '', label)); databaseCounts.appendChild(tile);
+    }
+    const refreshState = data.refresh;
+    const progress = refreshState.total ? ` (${refreshState.processed.toLocaleString()} / ${refreshState.total.toLocaleString()})` : '';
+    databaseRefreshStatus.textContent = refreshState.status === 'running' ? `${refreshState.phase}${progress}. NightOwl compares playlist stream IDs and imports only missing entries.`
+      : refreshState.status === 'success' || refreshState.status === 'error' ? `${refreshState.message || (refreshState.status === 'success' ? 'Refresh complete.' : 'Refresh failed.')}${refreshState.finishedAt ? ` · ${new Date(refreshState.finishedAt).toLocaleString()}` : ''}`
+        : `Refresh scans the provider’s full lists and series details, then adds provider IDs not already in the database.${data.lastRefreshed ? ` Most recently imported stream: ${new Date(data.lastRefreshed).toLocaleString()}.` : ''}`;
+    databaseRefresh.disabled = refreshState.status === 'running'; databaseRefresh.textContent = refreshState.status === 'running' ? 'Refreshing…' : 'Refresh catalog';
+    if (refreshState.status === 'running') window.setTimeout(() => { void updateDatabaseSummary().catch((error) => { databaseRefreshStatus.textContent = errorMessage(error); }); }, 2000);
+  };
+  databaseRefresh.onclick = () => {
+    databaseRefresh.disabled = true; databaseRefreshStatus.textContent = 'Starting provider catalog check…';
+    void api('/provider/sync', {}).then(() => updateDatabaseSummary())
+      .catch((error) => { databaseRefreshStatus.textContent = errorMessage(error); databaseRefresh.disabled = false; });
+  };
+  const categoryDescription = node('p', 'central-settings-description', 'Choose which provider categories appear in Live TV. Hidden categories are excluded from channel lists and search.');
+  const categoryLanguageLabel = node('label', 'central-settings-category-language');
+  categoryLanguageLabel.appendChild(node('span', undefined, 'Language'));
+  const categoryLanguage = node('select', 'central-category-select') as HTMLSelectElement;
+  categoryLanguage.setAttribute('aria-label', 'Filter categories by language');
+  categoryLanguage.appendChild(new Option('All languages', ''));
+  categoryLanguageLabel.appendChild(categoryLanguage);
+  const categoryActions = node('div', 'central-settings-category-actions');
+  const showAllCategories = node('button', 'central-more', 'Show all') as HTMLButtonElement; showAllCategories.type = 'button';
+  const hideAllCategories = node('button', 'central-more', 'Hide all') as HTMLButtonElement; hideAllCategories.type = 'button';
+  categoryActions.append(showAllCategories, hideAllCategories);
+  const liveCategoryGrid = node('div', 'central-settings-live-category-grid');
+  const liveCategoryStatus = node('p', 'provider-message', 'Loading Live TV categories…');
+  liveCategoriesPage.append(categoryDescription, categoryLanguageLabel, categoryActions, liveCategoryStatus, liveCategoryGrid);
+  let liveSettingsCategories: BrowseCategory[] = [];
+  const persistHiddenLiveCategories = (): void => {
+    localStorage.setItem('streamcinema.hidden-live-categories', JSON.stringify([...hiddenLiveCategoryIds]));
+    if (selectedCategoryBySection.live && hiddenLiveCategoryIds.has(selectedCategoryBySection.live)) selectedCategoryBySection.live = '';
+  };
+  const renderLiveCategoryOptions = (): void => {
+    const selectedCode = categoryLanguage.value;
+    const shownCategories = liveSettingsCategories.filter((item) => !selectedCode || liveCategoryCode(item.name) === selectedCode);
+    clear(liveCategoryGrid);
+    shownCategories.forEach((category) => {
+      const option = node('label', 'central-settings-live-category-option');
+      const checkbox = node('input') as HTMLInputElement; checkbox.type = 'checkbox'; checkbox.checked = !hiddenLiveCategoryIds.has(category.id);
+      checkbox.onchange = () => {
+        if (checkbox.checked) hiddenLiveCategoryIds.delete(category.id); else hiddenLiveCategoryIds.add(category.id);
+        persistHiddenLiveCategories();
+      };
+      option.append(checkbox, document.createTextNode(category.name)); liveCategoryGrid.appendChild(option);
+    });
+    liveCategoryStatus.textContent = shownCategories.length ? `${shownCategories.length} categories shown in this language filter.` : 'No categories match this language filter.';
+  };
+  categoryLanguage.onchange = renderLiveCategoryOptions;
+  showAllCategories.onclick = () => { liveSettingsCategories.filter((item) => !categoryLanguage.value || liveCategoryCode(item.name) === categoryLanguage.value).forEach((item) => hiddenLiveCategoryIds.delete(item.id)); persistHiddenLiveCategories(); renderLiveCategoryOptions(); };
+  hideAllCategories.onclick = () => { liveSettingsCategories.filter((item) => !categoryLanguage.value || liveCategoryCode(item.name) === categoryLanguage.value).forEach((item) => hiddenLiveCategoryIds.add(item.id)); persistHiddenLiveCategories(); renderLiveCategoryOptions(); };
+  void api<{ items: BrowseCategory[] }>(`/live/categories?language=${encodeURIComponent(appLanguage)}`).then((result) => {
+    liveSettingsCategories = result.items;
+    [...new Set(liveSettingsCategories.map((item) => liveCategoryCode(item.name)))].sort((a, b) => a === 'other' ? 1 : b === 'other' ? -1 : a.localeCompare(b))
+      .forEach((code) => categoryLanguage.appendChild(new Option(code === 'other' ? 'Other' : code, code)));
+    renderLiveCategoryOptions();
+  }).catch((error) => { liveCategoryStatus.textContent = errorMessage(error); });
+  selectSettingsPage(activeSettingsPage);
+  layout.append(sidebar, pageHost); panel.appendChild(layout); content.appendChild(panel);
+  layout.addEventListener('keydown', (event) => {
+    const active = document.activeElement as HTMLElement | null;
+    if (!active || !['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return;
+    const categoryGrid = active.closest<HTMLElement>('.central-settings-live-category-grid');
+    if (categoryGrid && active instanceof HTMLInputElement && active.type === 'checkbox') {
+      const currentRect = active.getBoundingClientRect();
+      const currentX = currentRect.left + currentRect.width / 2, currentY = currentRect.top + currentRect.height / 2;
+      const direction = event.key;
+      const choices = Array.from(categoryGrid.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')).filter((input) => input !== active && input.offsetParent !== null)
+        .map((input) => {
+          const rect = input.getBoundingClientRect(), x = rect.left + rect.width / 2, y = rect.top + rect.height / 2;
+          const primary = direction === 'ArrowLeft' ? currentX - x : direction === 'ArrowRight' ? x - currentX : direction === 'ArrowUp' ? currentY - y : y - currentY;
+          const cross = direction === 'ArrowLeft' || direction === 'ArrowRight' ? Math.abs(y - currentY) : Math.abs(x - currentX);
+          return { input, primary, cross, score: primary + cross * 2.5 };
+        }).filter((entry) => entry.primary > 2).sort((a, b) => a.score - b.score);
+      const next = choices[0]?.input;
+      event.preventDefault(); event.stopPropagation();
+      if (next) { next.focus(); next.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' }); }
+      else if (direction === 'ArrowUp') { showAllCategories.focus(); showAllCategories.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }
+      return;
+    }
+    if (active.closest('.central-settings-category-actions')) {
+      const actions = [showAllCategories, hideAllCategories];
+      const index = actions.indexOf(active as HTMLButtonElement);
+      if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+        const next = actions[index + (event.key === 'ArrowRight' ? 1 : -1)];
+        if (next) { event.preventDefault(); event.stopPropagation(); next.focus(); }
+        return;
+      }
+      if (event.key === 'ArrowUp') {
+        event.preventDefault(); event.stopPropagation(); categoryLanguage.focus(); categoryLanguage.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); return;
+      }
+      if (event.key === 'ArrowDown') {
+        const firstCategory = liveCategoryGrid.querySelector<HTMLInputElement>('input[type="checkbox"]');
+        if (firstCategory) { event.preventDefault(); event.stopPropagation(); firstCategory.focus(); firstCategory.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }
+        return;
+      }
+    }
+    if (active === categoryLanguage && event.key === 'ArrowDown') {
+      event.preventDefault(); event.stopPropagation(); showAllCategories.focus(); showAllCategories.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); return;
+    }
+    if (active.closest('.central-settings-sidebar')) {
+      if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+        const navItems = Array.from(sidebar.querySelectorAll<HTMLButtonElement>('.central-settings-nav-item'));
+        const index = navItems.indexOf(active as HTMLButtonElement);
+        const next = navItems[index + (event.key === 'ArrowDown' ? 1 : -1)];
+        if (next) { event.preventDefault(); event.stopPropagation(); next.focus(); }
+      } else if (event.key === 'ArrowRight') {
+        const first = pageById.get(activeSettingsPage)?.querySelector<HTMLElement>('input:not([disabled]),button:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex="0"]');
+        if (first) { event.preventDefault(); event.stopPropagation(); first.focus(); first.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }
+      }
+      return;
+    }
+    if (event.key === 'ArrowLeft') {
+      event.preventDefault(); event.stopPropagation(); navById.get(activeSettingsPage)?.focus();
+    }
+  });
+  panel.addEventListener('keydown', (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLInputElement) || target.disabled) return;
+    const isOk = event.key === 'Enter' || event.key === 'OK' || event.keyCode === 13 || event.keyCode === 23;
+    const isUp = event.key === 'ArrowUp';
+    const isDown = event.key === 'ArrowDown';
+    if (!isOk && !isUp && !isDown) return;
+    const focusables = Array.from(pageById.get(activeSettingsPage)?.querySelectorAll<HTMLElement>('input:not([disabled]),button:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex="0"]') ?? [])
+      .filter((element) => element.offsetParent !== null);
+    const currentIndex = focusables.indexOf(target);
+    if (currentIndex < 0) return;
+    if (target.type === 'checkbox' && isOk) {
+      event.preventDefault(); event.stopPropagation(); target.click(); return;
+    }
+    if (isOk || isDown) {
+      const next = focusables[currentIndex + 1];
+      if (!next) return;
+      event.preventDefault(); event.stopPropagation(); next.focus(); next.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    } else if (isUp) {
+      const previous = focusables[currentIndex - 1];
+      if (!previous) return;
+      event.preventDefault(); event.stopPropagation(); previous.focus(); previous.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+  });
   try {
-    const data = await api<{ datasets: Array<{ dataset: string; status: string; lastSuccessAt?: string }> }>('/sync/status');
-    sync.textContent = data.datasets.map((entry) => `${entry.dataset}: ${entry.status}${entry.lastSuccessAt ? ` · ${new Date(entry.lastSuccessAt).toLocaleString()}` : ''}`).join('  |  ') || 'Catalog has not synchronized yet.';
+    const tmdb = await api<{ configured: boolean }>('/tmdb/status');
+    tmdbStatus.textContent = tmdb.configured ? 'TMDB is configured. Home rows are matched to titles in your IPTV catalog.' : 'TMDB is not configured. Home is showing recently added titles only.';
+  } catch (error) { tmdbStatus.textContent = errorMessage(error); }
+  try {
+    const subtitles = await api<{ configured: boolean }>('/opensubtitles/status');
+    openSubtitlesStatus.textContent = subtitles.configured ? 'OpenSubtitles is configured.' : 'OpenSubtitles is not configured. Add your API key to search for subtitles.';
+  } catch (error) { openSubtitlesStatus.textContent = errorMessage(error); }
+  try {
+    const data = await api<{ source?: string; datasets: Array<{ dataset: string; status: string; rowCount?: number; lastSuccessAt?: string }> }>('/sync/status');
+    sync.textContent = data.source === 'normalized_database'
+      ? `Catalog is loaded from PostgreSQL: ${data.datasets.map((entry) => `${entry.dataset} ${entry.rowCount ?? 0}`).join(' · ')}. View counts and refresh it from Database.`
+      : data.datasets.map((entry) => `${entry.dataset}: ${entry.status}${entry.lastSuccessAt ? ` · ${new Date(entry.lastSuccessAt).toLocaleString()}` : ''}`).join('  |  ') || 'No server sync status is available.';
   } catch (error) { sync.textContent = errorMessage(error); }
 }
 async function connect(next: Config): Promise<void> {
+  invalidateCatalogCache();
   config = next;
   await api('/health');
+  const languageData = await api<{ items: AppLanguage[] }>('/languages');
+  availableLanguages = languageData.items.filter((language) => language.code !== 'und' && language.name.toLowerCase() !== 'unlabelled');
+  localStorage.removeItem('streamcinema.language');
+  subtitleSearchLanguages = subtitleSearchLanguages.filter((code) => availableLanguages.some((language) => language.code === code));
+  if (!subtitleSearchLanguages.length) subtitleSearchLanguages = [availableLanguages.some(({ code }) => code === 'en') ? 'en' : availableLanguages[0]?.code || 'en'];
+  localStorage.setItem('streamcinema.subtitle-languages', JSON.stringify(subtitleSearchLanguages));
   const result = await api<{ items: Profile[] }>('/profiles');
   profiles = result.items;
   if (!profiles.length) { const first = await api<Profile>('/profiles', { name: 'Default' }); profiles = [first]; }
   profile = profiles.find((entry) => entry.id === localStorage.getItem('streamcinema.profile')) ?? profiles[0];
   localStorage.setItem('streamcinema.profile', profile.id);
-  profileButton.textContent = profile.name;
+  renderProfileButton();
   localStorage.setItem('streamcinema.config', JSON.stringify(next));
   setup.classList.add('hidden'); app.classList.remove('hidden'); navigate('home');
+  window.setTimeout(() => { void preloadBrowseScreens(); }, 0);
 }
 
 el<HTMLFormElement>('central-form').onsubmit = (event) => {
   event.preventDefault();
-  const input = { url: el<HTMLInputElement>('central-url').value, token: el<HTMLInputElement>('central-token').value.trim() };
+  const username = el<HTMLInputElement>('central-username').value.trim();
+  const password = el<HTMLInputElement>('central-password').value;
+  const button = document.querySelector<HTMLButtonElement>('#central-form button[type="submit"]');
+  if (button) button.disabled = true;
+  el('central-setup-error').textContent = 'Signing in…';
   void (async () => {
-    try { await connect({ url: safeUrl(input.url), token: input.token }); }
-    catch (error) { el('central-setup-error').textContent = errorMessage(error); }
+    try {
+      const session = await loginWithAccount(username, password);
+      await connect(session);
+      el<HTMLInputElement>('central-username').value = '';
+      el<HTMLInputElement>('central-password').value = '';
+    } catch (error) {
+      el('central-setup-error').textContent = errorMessage(error);
+    }
+    finally { if (button) button.disabled = false; }
   })();
 };
 document.querySelectorAll<HTMLButtonElement>('#central-app [data-view]').forEach((button) => {
@@ -456,43 +1833,242 @@ document.querySelectorAll<HTMLButtonElement>('#central-app [data-view]').forEach
 profileButton.onclick = () => navigate('profiles');
 el<HTMLButtonElement>('central-player-back').onclick = () => closePlayer();
 el<HTMLButtonElement>('central-play-pause').onclick = () => { if (video.paused) void video.play(); else video.pause(); };
-el<HTMLButtonElement>('central-rewind').onclick = () => { if (video.seekable.length) video.currentTime = Math.max(0, video.currentTime - 10); };
-el<HTMLButtonElement>('central-forward').onclick = () => { if (video.seekable.length) video.currentTime += 10; };
-el<HTMLButtonElement>('central-subtitle').onclick = () => {
+el<HTMLButtonElement>('central-rewind').onclick = () => { seekBy(-10); revealPlayerControls(); };
+el<HTMLButtonElement>('central-forward').onclick = () => { seekBy(10); revealPlayerControls(); };
+function seekTo(seconds: number): void {
+  if (!Number.isFinite(video.duration) || video.duration <= 0) return;
+  try { video.currentTime = Math.max(0, Math.min(video.duration, seconds)); updatePlaybackProgress(); } catch { /* Some live streams do not expose a seekable range. */ }
+}
+function seekBy(seconds: number): void { seekTo(video.currentTime + seconds); }
+const seekTrack = el<HTMLInputElement>('central-player-track');
+function updatePlayerOptionVisibility(): void {
+  const live = playingItem?.kind === 'live';
+  player.classList.toggle('live-playback', live);
+  el('central-audio').classList.toggle('hidden', live);
+  el('central-subtitle').classList.toggle('hidden', live);
+  el('central-fullscreen').classList.remove('hidden');
+}
+seekTrack.addEventListener('input', () => {
+  if (!Number.isFinite(video.duration) || video.duration <= 0) return;
+  seekTo((Number(seekTrack.value) / Number(seekTrack.max)) * video.duration);
+  revealPlayerControls();
+});
+function showStreamLanguageMenu(): void {
+  if (!playingItem) return;
+  const options = el('central-player-stream-options'); clear(options);
+  const heading = el('central-player-stream-menu').querySelector<HTMLElement>('.central-player-stream-menu-heading strong');
+  if (heading) heading.textContent = 'Available languages';
+  let optionCount = 0;
+  const streams = playingItem.streams ?? [];
+  const available = streams.filter((stream, index, all) => all.findIndex((candidate) =>
+    (candidate.providerId || candidate.id) === (stream.providerId || stream.id)) === index);
+  const languageCounts = new Map<string, number>();
+  for (const stream of available) {
+    const language = stream.language?.trim() || stream.languageCode?.toUpperCase() || 'Unlabelled';
+    languageCounts.set(language, (languageCounts.get(language) ?? 0) + 1);
+  }
+  const languageIndices = new Map<string, number>();
+  if (available.length) {
+    options.appendChild(node('h3', 'central-player-stream-group', 'Stream versions'));
+    for (const stream of available) {
+      const id = stream.providerId || stream.id;
+      const currentId = playingItem.streamId || playingItem.id;
+      const language = stream.language?.trim() || stream.languageCode?.toUpperCase() || 'Unlabelled';
+      const languageIndex = (languageIndices.get(language) ?? 0) + 1; languageIndices.set(language, languageIndex);
+      const version = (languageCounts.get(language) ?? 0) > 1 ? ` · Version ${languageIndex}` : '';
+      const button = node('button', 'central-player-stream-option', `${language}${version}${stream.extension ? ` · ${stream.extension.toUpperCase()}` : ''}${id === currentId ? ' · Playing' : ''}`) as HTMLButtonElement;
+      button.setAttribute('aria-current', id === currentId ? 'true' : 'false');
+      button.onclick = () => {
+        if (!playingItem || id === (playingItem.streamId || playingItem.id)) { el('central-player-stream-menu').classList.add('hidden'); return; }
+        const resumeAt = Number.isFinite(video.currentTime) ? video.currentTime : 0;
+        const nextItem = { ...playingItem, id, streamId: id };
+        el('central-player-stream-menu').classList.add('hidden');
+        video.pause();
+        void play(nextItem, activeLiveFormat, resumeAt);
+      };
+      options.appendChild(button); optionCount++;
+    }
+  }
+  const audioTracks = (video as HTMLVideoElement & { audioTracks?: { length: number; [index: number]: { enabled: boolean; label?: string; language?: string } } }).audioTracks;
+  if (audioTracks?.length) {
+    options.appendChild(node('h3', 'central-player-stream-group', 'Audio tracks in this stream'));
+    for (let index = 0; index < audioTracks.length; index++) {
+      const track = audioTracks[index];
+      const trackName = track.label?.trim() || track.language?.trim()?.toUpperCase() || `Audio track ${index + 1}`;
+      const button = node('button', 'central-player-stream-option', `${trackName}${track.enabled ? ' · Playing' : ''}`) as HTMLButtonElement;
+      button.setAttribute('aria-current', track.enabled ? 'true' : 'false');
+      button.onclick = () => {
+        for (let trackIndex = 0; trackIndex < audioTracks.length; trackIndex++) audioTracks[trackIndex].enabled = trackIndex === index;
+        playerStatus.textContent = `Audio track: ${trackName}`;
+        el('central-player-stream-menu').classList.add('hidden'); el<HTMLButtonElement>('central-audio').focus(); revealPlayerControls();
+      };
+      options.appendChild(button); optionCount++;
+    }
+  }
+  if (!optionCount) options.appendChild(node('p', undefined, 'No alternate stream languages or embedded audio tracks are available.'));
+  const menu = el('central-player-stream-menu');
+  menu.classList.remove('hidden'); revealPlayerControls();
+  menu.querySelector<HTMLButtonElement>('.central-player-stream-option')?.focus() ?? el<HTMLButtonElement>('central-player-stream-close').focus();
+}
+el<HTMLButtonElement>('central-audio').onclick = showStreamLanguageMenu;
+el<HTMLButtonElement>('central-player-stream-close').onclick = () => { el('central-player-stream-menu').classList.add('hidden'); el<HTMLButtonElement>('central-audio').focus(); revealPlayerControls(); };
+el<HTMLButtonElement>('central-fullscreen').onclick = () => {
+  const playerWithWebkit = player as HTMLElement & { webkitRequestFullscreen?: () => void };
+  const videoWithWebkit = video as HTMLVideoElement & { webkitEnterFullscreen?: () => void };
+  const documentWithWebkit = document as Document & { webkitFullscreenElement?: Element | null; webkitExitFullscreen?: () => void };
+  const fullscreenActive = document.fullscreenElement === player || documentWithWebkit.webkitFullscreenElement === player;
+  if (fullscreenActive) {
+    if (document.exitFullscreen) void document.exitFullscreen().catch(() => { playerStatus.textContent = 'Could not exit fullscreen.'; });
+    else documentWithWebkit.webkitExitFullscreen?.();
+  }
+  else if (player.requestFullscreen) void player.requestFullscreen().catch(() => { playerStatus.textContent = 'Fullscreen is unavailable in this browser.'; });
+  else if (playerWithWebkit.webkitRequestFullscreen) playerWithWebkit.webkitRequestFullscreen();
+  else if (videoWithWebkit.webkitEnterFullscreen) videoWithWebkit.webkitEnterFullscreen();
+  else playerStatus.textContent = 'Fullscreen is unavailable in this browser.';
+  revealPlayerControls();
+};
+function clearExternalSubtitle(): void {
+  externalSubtitleTrack?.remove(); externalSubtitleTrack = null;
+  if (externalSubtitleBlobUrl) URL.revokeObjectURL(externalSubtitleBlobUrl);
+  externalSubtitleBlobUrl = '';
+}
+function selectSubtitleTrack(selected: TextTrack | null, label: string): void {
   const tracks = video.textTracks;
-  if (!tracks.length) { playerStatus.textContent = 'No subtitles available for this stream.'; return; }
-  subtitlesIndex = (subtitlesIndex + 1) % (tracks.length + 1);
-  for (let index = 0; index < tracks.length; index++) tracks[index].mode = index === subtitlesIndex ? 'showing' : 'disabled';
-  playerStatus.textContent = subtitlesIndex === tracks.length ? 'Subtitles off' : `Subtitles: ${tracks[subtitlesIndex].label || tracks[subtitlesIndex].language || subtitlesIndex + 1}`;
-};
-el<HTMLButtonElement>('central-audio').onclick = () => {
-  const tracks = (video as HTMLVideoElement & { audioTracks?: { length: number; [index: number]: { enabled: boolean; label?: string; language?: string } } }).audioTracks;
-  if (!tracks?.length) { playerStatus.textContent = 'Audio track selection is unavailable for this stream.'; return; }
-  audioIndex = (audioIndex + 1) % tracks.length;
-  for (let index = 0; index < tracks.length; index++) tracks[index].enabled = index === audioIndex;
-  playerStatus.textContent = `Audio: ${tracks[audioIndex].label || tracks[audioIndex].language || audioIndex + 1}`;
-};
+  for (let index = 0; index < tracks.length; index++) tracks[index].mode = tracks[index] === selected ? 'showing' : 'disabled';
+  subtitlesIndex = selected ? Array.from({ length: tracks.length }, (_, index) => tracks[index]).indexOf(selected) : tracks.length;
+  playerStatus.textContent = selected ? `Subtitles: ${label}` : 'Subtitles off';
+  el('central-player-stream-menu').classList.add('hidden'); revealPlayerControls();
+}
+function attachExternalSubtitle(vtt: string, label: string, language: string): void {
+  clearExternalSubtitle();
+  for (let index = 0; index < video.textTracks.length; index++) video.textTracks[index].mode = 'disabled';
+  const blob = new Blob([vtt], { type: 'text/vtt;charset=utf-8' });
+  externalSubtitleBlobUrl = URL.createObjectURL(blob);
+  const track = node('track') as HTMLTrackElement;
+  track.kind = 'subtitles'; track.label = label;
+  track.srclang = ({ eng: 'en', pol: 'pl', nld: 'nl', dut: 'nl' } as Record<string, string>)[language] ?? language;
+  track.src = externalSubtitleBlobUrl; track.default = true;
+  track.addEventListener('load', () => { track.track.mode = 'showing'; });
+  video.appendChild(track); externalSubtitleTrack = track;
+  window.setTimeout(() => { try { track.track.mode = 'showing'; } catch { /* Track may not have loaded yet. */ } }, 100);
+  subtitlesIndex = 0; playerStatus.textContent = `Subtitles: ${label}`;
+  el('central-player-stream-menu').classList.add('hidden'); revealPlayerControls();
+}
+function showSubtitleMenu(): void {
+  if (!playingItem) return;
+  const menu = el('central-player-stream-menu');
+  const heading = menu.querySelector<HTMLElement>('.central-player-stream-menu-heading strong');
+  if (heading) heading.textContent = 'Subtitles';
+  const options = el('central-player-stream-options'); clear(options);
+  const off = node('button', 'central-player-stream-option', 'Turn subtitles off') as HTMLButtonElement;
+  off.onclick = () => selectSubtitleTrack(null, 'Off'); options.appendChild(off);
+  const tracks = video.textTracks;
+  for (let index = 0; index < tracks.length; index++) {
+    const track = tracks[index];
+    const label = track.label || track.language || `Subtitle track ${index + 1}`;
+    const button = node('button', 'central-player-stream-option', `Embedded · ${label}${track.mode === 'showing' ? ' · Playing' : ''}`) as HTMLButtonElement;
+    button.onclick = () => selectSubtitleTrack(track, label); options.appendChild(button);
+  }
+  options.appendChild(node('h3', 'central-player-stream-group', 'Search OpenSubtitles'));
+  const form = node('form', 'central-subtitle-search') as HTMLFormElement;
+  const language = node('select', 'central-category-select') as HTMLSelectElement;
+  availableLanguages.filter(({ code }) => subtitleSearchLanguages.includes(code)).forEach(({ code, name }) => language.appendChild(new Option(name, code)));
+  if (subtitleSearchLanguages.includes(appLanguage)) language.value = appLanguage;
+  else if (subtitleSearchLanguages.length) language.value = subtitleSearchLanguages[0];
+  const search = node('button', 'central-player-stream-option', 'Search subtitles') as HTMLButtonElement; search.type = 'submit';
+  form.append(language, search); options.appendChild(form);
+  const results = node('div', 'central-subtitle-results'); options.appendChild(results);
+  form.onsubmit = (event) => {
+    event.preventDefault(); search.disabled = true; search.textContent = 'Searching…'; clear(results);
+    const sourceItem = playingItem;
+    if (!sourceItem) return;
+    const episode = sourceItem.kind === 'episode';
+    const series = episode && currentItem?.kind === 'series' ? currentItem : null;
+    const rawTitle = series?.title ?? sourceItem.title;
+    const query = rawTitle.replace(/^\s*(?:[A-Z]{2,5}|NF|MULTI)\s*[-|:]\s*/i, '')
+      .replace(/\s*\((?:\d{4}|MULTI SUB|[A-Z]{2,8} SUB)\).*$/i, '').replace(/\s+\d{4}\s*$/, '').trim();
+    if (query.length < 3) {
+      results.appendChild(node('p', undefined, 'OpenSubtitles needs at least three characters to search this title.'));
+      search.disabled = false; search.textContent = 'Search subtitles'; return;
+    }
+    const preferredSubtitleLanguage = subtitleSearchLanguages.find((code) => availableLanguages.some((entry) => entry.code === code));
+    const subtitleLanguage = availableLanguages.some((entry) => entry.code === language.value)
+      ? language.value : preferredSubtitleLanguage ?? availableLanguages.find((entry) => entry.code === appLanguage)?.code ?? '';
+    const rawTmdbId = series?.metadata?.tmdbId ?? sourceItem.metadata?.tmdbId;
+    const tmdbId = rawTmdbId !== undefined && /^\d+$/.test(String(rawTmdbId)) ? String(rawTmdbId) : undefined;
+    const seasonNumber = episode ? Number(sourceItem.seasonNumber) : undefined;
+    const episodeNumber = episode ? Number(sourceItem.episodeNumber) : undefined;
+    void api<{ items: Array<{ fileId:number; language:string; release:string; fileName:string; downloadCount:number; hearingImpaired:boolean }> }>('/opensubtitles/search', {
+      kind: episode ? 'episode' : 'movie', id: sourceItem.streamId || sourceItem.id, query, language: subtitleLanguage,
+      tmdbId,
+      seasonNumber: Number.isInteger(seasonNumber) && seasonNumber! >= 0 && seasonNumber! <= 100 ? seasonNumber : undefined,
+      episodeNumber: Number.isInteger(episodeNumber) && episodeNumber! >= 0 && episodeNumber! <= 5000 ? episodeNumber : undefined,
+    }).then(({items}) => {
+      if (!items.length) results.appendChild(node('p', undefined, 'No matching subtitles found.'));
+      const orderedItems = [...items].sort((a, b) => preferHearingImpairedSubtitles
+        ? Number(b.hearingImpaired) - Number(a.hearingImpaired) : Number(a.hearingImpaired) - Number(b.hearingImpaired));
+      for (const subtitle of orderedItems) {
+        const button = node('button', 'central-player-stream-option', `${subtitle.language} · ${subtitle.release}${subtitle.hearingImpaired ? ' · SDH' : ''} · ${subtitle.downloadCount} downloads`) as HTMLButtonElement;
+        button.title = subtitle.fileName;
+        button.onclick = () => {
+          button.disabled = true; button.textContent = 'Downloading…';
+          void api<{vtt:string}>('/opensubtitles/download',{fileId:subtitle.fileId})
+            .then(({vtt}) => attachExternalSubtitle(vtt, subtitle.language, language.value))
+            .catch((error) => { button.disabled = false; button.textContent = subtitle.release; setStatus(errorMessage(error)); });
+        };
+        results.appendChild(button);
+      }
+    }).catch((error) => { results.appendChild(node('p', undefined, errorMessage(error))); })
+      .finally(() => { search.disabled = false; search.textContent = 'Search subtitles'; });
+  };
+  menu.classList.remove('hidden'); revealPlayerControls(); off.focus();
+}
+el<HTMLButtonElement>('central-subtitle').onclick = showSubtitleMenu;
 video.ontimeupdate = () => {
   updatePlaybackProgress();
   if (Date.now() - lastProgressSave >= 15_000 && playingItem) { lastProgressSave = Date.now(); void saveProgress(); }
 };
+video.textTracks.addEventListener('addtrack', updatePlayerOptionVisibility);
 video.onended = () => { void saveProgress(true); closePlayer(false); };
 video.onerror = () => {
   if (playingItem?.kind === 'live' && activeLiveFormat === 'm3u8') { const item = playingItem; playingItem = null; void play(item, 'ts'); return; }
-  if (playingItem) playerStatus.textContent = 'This stream could not play. Check TV codec and stream format support.';
+  if (playingItem && activeRemuxMode === 'copy' && !remuxTranscodeAttempted && (video.error?.code === MediaError.MEDIA_ERR_DECODE || video.error?.code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED)) {
+    const item = playingItem; const resumeAt = Number.isFinite(video.currentTime) ? Math.floor(video.currentTime) : undefined;
+    remuxTranscodeAttempted = true; playerStatus.textContent = 'Trying compatibility conversion…';
+    void play(item, activeLiveFormat, resumeAt, undefined, true); return;
+  }
+  if (playingItem) { playerStatus.textContent = 'This stream could not play. Check the stream format or TV codec support.'; revealPlayerControls(); }
 };
-video.onpause = () => { el('central-play-pause').textContent = 'Play'; };
-video.onplay = () => { el('central-play-pause').textContent = 'Pause'; };
+video.onwaiting = () => { playerStatus.textContent = 'Buffering…'; revealPlayerControls(); };
+video.onplaying = () => { playerStatus.textContent = ''; updatePlayerOptionVisibility(); revealPlayerControls(); };
+video.onclick = () => {
+  if (player.classList.contains('controls-hidden')) revealPlayerControls();
+  else if (video.paused) void video.play(); else video.pause();
+};
+function setPlayPauseIcon(isPaused: boolean): void {
+  const button = el<HTMLButtonElement>('central-play-pause');
+  button.setAttribute('aria-label', isPaused ? 'Play' : 'Pause');
+  button.innerHTML = isPaused
+    ? '<svg viewBox="0 0 32 32" aria-hidden="true"><path d="m11 6 15 10-15 10z"/></svg>'
+    : '<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M11 7v18M21 7v18"/></svg>';
+}
+video.onpause = () => { setPlayPauseIcon(true); revealPlayerControls(); };
+video.onplay = () => { setPlayPauseIcon(false); revealPlayerControls(); };
+player.addEventListener('pointermove', () => { if (!player.classList.contains('hidden')) revealPlayerControls(); });
 
 document.addEventListener('keydown', (event) => {
-  const active = document.activeElement as HTMLElement | null;
+  let active = document.activeElement as HTMLElement | null;
   const key = event.keyCode;
   const isBack = [461, 10009, 8, 27].includes(key) || ['Escape', 'BrowserBack'].includes(event.key);
   if ((active?.tagName === 'INPUT' || active?.tagName === 'TEXTAREA') && key === 8) return;
-  if ((active?.tagName === 'INPUT' || active?.tagName === 'TEXTAREA') && !isBack) return;
+  const seekInputActive = active?.id === 'central-player-track';
+  if ((active?.tagName === 'INPUT' || active?.tagName === 'TEXTAREA') && !isBack && !seekInputActive) return;
   if (isBack) {
     event.preventDefault();
-    if (!player.classList.contains('hidden')) closePlayer();
+    if (!player.classList.contains('hidden') && !el('central-player-stream-menu').classList.contains('hidden')) {
+      el('central-player-stream-menu').classList.add('hidden'); el<HTMLButtonElement>('central-audio').focus();
+    }
+    else if (!player.classList.contains('hidden')) closePlayer();
     else if (view === 'detail') backFromDetail();
     else if (view !== 'home') navigate('home');
     else document.querySelector<HTMLButtonElement>('#central-nav [data-view="home"]')?.focus();
@@ -501,16 +2077,141 @@ document.addEventListener('keydown', (event) => {
   if (key === 23 && active?.tagName === 'BUTTON') { event.preventDefault(); active.click(); return; }
   const playerOpen = !player.classList.contains('hidden');
   if (playerOpen) {
+    const controlsWereHidden = player.classList.contains('controls-hidden');
+    revealPlayerControls();
+    if (controlsWereHidden && [37, 38, 39, 40].includes(key)) {
+      el<HTMLButtonElement>('central-play-pause').focus();
+      active = document.activeElement as HTMLElement | null;
+    }
     if (key === 415 || key === 19) { event.preventDefault(); if (video.paused) void video.play(); else video.pause(); }
-    if (key === 412 && video.seekable.length) { event.preventDefault(); video.currentTime = Math.max(0, video.currentTime - 10); }
-    if (key === 417 && video.seekable.length) { event.preventDefault(); video.currentTime += 10; }
+    if (key === 412 || ['MediaRewind', 'Rewind'].includes(event.key) || event.code === 'MediaRewind') { event.preventDefault(); seekBy(-10); return; }
+    if (key === 417 || ['MediaFastForward', 'FastForward'].includes(event.key) || event.code === 'MediaFastForward') { event.preventDefault(); seekBy(10); return; }
+    if ([37, 38, 39, 40].includes(key)) {
+      const menuOpen = !el('central-player-stream-menu').classList.contains('hidden');
+      if (!menuOpen && active?.id === 'central-player-track' && (key === 37 || key === 39)) {
+        event.preventDefault(); event.stopPropagation(); seekBy(key === 37 ? -10 : 10); return;
+      }
+      if (!menuOpen && active?.id === 'central-player-track' && key === 38) {
+        event.preventDefault(); event.stopPropagation(); el<HTMLButtonElement>('central-player-back').focus(); return;
+      }
+      if (!menuOpen && active?.id === 'central-player-track' && key === 40) {
+        event.preventDefault(); event.stopPropagation(); el<HTMLButtonElement>('central-play-pause').focus(); return;
+      }
+      if (!menuOpen && active?.id === 'central-player-back' && key === 40) {
+        event.preventDefault(); event.stopPropagation(); seekTrack.focus(); return;
+      }
+      if (!menuOpen && active?.closest('.central-player-center-controls') && key === 38) {
+        event.preventDefault(); event.stopPropagation(); seekTrack.focus(); return;
+      }
+    }
     if (![37, 38, 39, 40].includes(key)) return;
   }
   if (![37, 38, 39, 40].includes(key)) return;
+  if (!playerOpen && key === 39 && active?.id === 'central-profile') {
+    const searchTab = document.querySelector<HTMLButtonElement>('#central-nav [data-view="search"]');
+    if (searchTab) { event.preventDefault(); event.stopPropagation(); searchTab.focus(); return; }
+  }
+  if (!playerOpen && key === 39 && active?.dataset.view === 'my-list') {
+    const settingsButton = document.querySelector<HTMLButtonElement>('#central-settings-shortcut');
+    if (settingsButton) { event.preventDefault(); event.stopPropagation(); settingsButton.focus(); return; }
+  }
+  if (!playerOpen && key === 37 && active?.id === 'central-settings-shortcut') {
+    const myCinemaTab = document.querySelector<HTMLButtonElement>('#central-nav [data-view="my-list"]');
+    if (myCinemaTab) { event.preventDefault(); event.stopPropagation(); myCinemaTab.focus(); return; }
+  }
+  if (!playerOpen && view === 'search' && key === 40 && active?.closest('#central-header')) {
+    const searchInput = content.querySelector<HTMLInputElement>('.central-search-page input');
+    if (searchInput) { event.preventDefault(); searchInput.focus(); searchInput.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); return; }
+  }
+  if (!playerOpen && view === 'search' && key === 38 && active?.closest('.central-search-results .central-card')) {
+    const searchInput = content.querySelector<HTMLInputElement>('.central-search-page input');
+    const resultCards = content.querySelectorAll<HTMLButtonElement>('.central-search-results .central-card');
+    const firstCardTop = resultCards[0]?.getBoundingClientRect().top;
+    const activeTop = active.getBoundingClientRect().top;
+    if (searchInput && firstCardTop !== undefined && Math.abs(activeTop - firstCardTop) < 8) {
+      event.preventDefault(); searchInput.focus(); searchInput.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); return;
+    }
+  }
+  if (!playerOpen && key === 38 && active?.closest('.central-hero')) {
+    const activeTab = document.querySelector<HTMLButtonElement>(`#central-nav [data-view="${view}"]`);
+    if (activeTab) { event.preventDefault(); activeTab.focus(); window.scrollTo({ top: 0, behavior: 'smooth' }); return; }
+  }
+  if (!playerOpen && (key === 38 || key === 40)) {
+    if (key === 40 && active?.dataset.moreCategories === 'true') { event.preventDefault(); return; }
+    const activeRow = active?.closest<HTMLElement>('.central-row');
+    const rows = Array.from(content.querySelectorAll<HTMLElement>('.central-row'));
+    const rowIndex = activeRow ? rows.indexOf(activeRow) : -1;
+    if (rowIndex >= 0) {
+      // Wrap from the bottom of the category list only after every category
+      // has been appended. Before that, Up must always mean the previous row.
+      const allCategoriesLoaded = !content.querySelector('[data-more-categories="true"]');
+      if (key === 38 && allCategoriesLoaded && rowIndex === rows.length - 1 && activeRow?.dataset.categoryIndex !== undefined) {
+        const firstCategory = content.querySelector<HTMLElement>('.central-category-shelves .central-row[data-category-index="0"], .central-category-shelves .central-category-spacer[data-category-index="0"]');
+        if (firstCategory && firstCategory !== activeRow) {
+          event.preventDefault();
+          const focusFirst = (): void => {
+            const firstCard = firstCategory.querySelector<HTMLButtonElement>('[data-card-key]');
+            if (firstCard) focusShelfCard(firstCard, firstCategory);
+            else if (firstCategory.classList.contains('central-category-spacer')) firstCategory.dispatchEvent(new Event('central-load-category-row'));
+          };
+            if (firstCategory.classList.contains('central-category-spacer')) firstCategory.dispatchEvent(new Event('central-load-category-row'));
+            else focusFirst();
+          return;
+        }
+      }
+      if (key === 38 && rowIndex === 0) {
+        const featuredAction = content.querySelector<HTMLButtonElement>('.central-hero-actions .primary');
+        if (featuredAction) {
+          event.preventDefault(); featuredAction.focus(); window.scrollTo({ top: 0, behavior: 'smooth' }); return;
+        }
+        const activeTab = document.querySelector<HTMLButtonElement>(`#central-nav [data-view="${view}"]`);
+        if (activeTab) { event.preventDefault(); activeTab.focus(); window.scrollTo({ top: 0, behavior: 'smooth' }); return; }
+      } else {
+        if (key === 40 && rowIndex === rows.length - 1) {
+          const moreCategories = content.querySelector<HTMLElement>('[data-more-categories="true"]');
+          if (moreCategories) { event.preventDefault(); moreCategories.dispatchEvent(new Event('central-load-more-categories')); return; }
+          const firstRow = rows[0];
+          if (firstRow && firstRow !== activeRow) {
+            event.preventDefault();
+            if (firstRow.classList.contains('central-category-spacer')) {
+              firstRow.dispatchEvent(new Event('central-load-category-row'));
+            } else {
+              const candidates = Array.from(firstRow.querySelectorAll<HTMLButtonElement>('[data-card-key]'));
+              const currentRect = active?.getBoundingClientRect();
+              const currentX = currentRect ? currentRect.left + currentRect.width / 2 : 0;
+              const target = candidates.sort((a, b) => {
+                const ax = a.getBoundingClientRect().left + a.getBoundingClientRect().width / 2;
+                const bx = b.getBoundingClientRect().left + b.getBoundingClientRect().width / 2;
+                return Math.abs(ax - currentX) - Math.abs(bx - currentX);
+              })[0];
+              if (target) focusShelfCard(target, firstRow);
+            }
+            return;
+          }
+        }
+        const nextIndex = key === 40 ? rowIndex + 1 : rowIndex - 1;
+        const nextRow = rows[nextIndex];
+        if (nextRow?.classList.contains('central-category-spacer')) {
+          event.preventDefault();
+          nextRow.dispatchEvent(new Event('central-load-category-row')); return;
+        }
+        const candidates = Array.from(rows[nextIndex]?.querySelectorAll<HTMLButtonElement>('[data-card-key]') ?? []);
+        const currentRect = active?.getBoundingClientRect();
+        const currentX = currentRect ? currentRect.left + currentRect.width / 2 : 0;
+        const target = candidates.sort((a, b) => {
+          const ax = a.getBoundingClientRect().left + a.getBoundingClientRect().width / 2;
+          const bx = b.getBoundingClientRect().left + b.getBoundingClientRect().width / 2;
+          return Math.abs(ax - currentX) - Math.abs(bx - currentX);
+        })[0];
+        if (target) { event.preventDefault(); focusShelfCard(target, nextRow!); return; }
+      }
+    }
+  }
   const current = active?.getBoundingClientRect();
   if (!current) return;
-  const scope = playerOpen ? '#central-player' : '#central-app';
-  const buttons = Array.from(document.querySelectorAll<HTMLElement>(`${scope} button:not([disabled])`)).filter((button) => button.offsetParent !== null && button !== active);
+  const menuOpen = playerOpen && !el('central-player-stream-menu').classList.contains('hidden');
+  const scope = menuOpen ? '#central-player-stream-menu' : playerOpen ? '#central-player' : '#central-app';
+  const buttons = Array.from(document.querySelectorAll<HTMLElement>(`${scope} button:not([disabled]), ${scope} input:not([disabled]), ${scope} select:not([disabled]), ${scope} textarea:not([disabled]), ${scope} [role="slider"][tabindex="0"]`)).filter((button) => button.offsetParent !== null && button !== active);
   const cx = current.left + current.width / 2, cy = current.top + current.height / 2;
   let best: HTMLElement | null = null, score = Infinity;
   for (const button of buttons) {
@@ -521,6 +2222,7 @@ document.addEventListener('keydown', (event) => {
     if (distance < score) { score = distance; best = button; }
   }
   if (best) { event.preventDefault(); best.focus(); best.scrollIntoView({ block: 'nearest', inline: 'nearest' }); }
+  if (playerOpen) { event.preventDefault(); event.stopPropagation(); }
 });
 
 try {
@@ -530,10 +2232,13 @@ try {
       setup.classList.remove('hidden'); el('central-setup-error').textContent = errorMessage(error);
     });
   } else {
+  if (localStorage.getItem('streamcinema.auth-version') !== 'nightowl-account-v1') {
+    localStorage.removeItem('streamcinema.config');
+    localStorage.setItem('streamcinema.auth-version', 'nightowl-account-v1');
+  }
   const saved = JSON.parse(localStorage.getItem('streamcinema.config') || 'null') as Config | null;
   if (saved?.url && saved.token) void connect(saved).catch((error) => {
     setup.classList.remove('hidden'); el('central-setup-error').textContent = errorMessage(error);
-    el<HTMLInputElement>('central-url').value = saved.url;
   });
   else setup.classList.remove('hidden');
   }

@@ -1,10 +1,10 @@
 {
   "id": "com.streamcinema.iptv",
-  "version": "0.1.0",
-  "vendor": "StreamCinema",
+  "version": "0.2.0",
+  "vendor": "NightOwl",
   "type": "web",
   "main": "index.html",
-  "title": "StreamCinema",
+  "title": "NightOwl",
   "icon": "icon.png",
   "resolution": "1920x1080",
   "disableBackHistoryAPI": true,

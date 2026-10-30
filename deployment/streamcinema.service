@@ -1,0 +1,25 @@
+[Unit]
+Description=StreamCinema IPTV API and web client
+After=network-online.target postgresql.service
+Wants=network-online.target
+Requires=postgresql.service
+
+[Service]
+Type=simple
+User=streamcinema
+Group=streamcinema
+WorkingDirectory=/opt/streamcinema/app/server
+EnvironmentFile=/etc/streamcinema.env
+ExecStart=/usr/bin/node /opt/streamcinema/app/server/dist/index.js
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

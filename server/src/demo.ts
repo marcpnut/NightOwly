@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { mapCatalogItem, mapEpisodes, playbackUrl, providerPlaybackInfo, requestProvider, type CatalogRecord, type ProviderCredentials } from './provider.js';
+import { curatedHome, hasTmdbToken, setTmdbToken, type HomeMedia } from './tmdb.js';
 
 type Item = { kind: 'movie' | 'series' | 'live' | 'episode'; id: string; title: string; description: string;
   genre?: string; releaseYear?: number; rating?: number; seasonNumber?: number; episodeNumber?: number;
@@ -58,26 +59,34 @@ async function syncProviderCatalog(): Promise<void> {
   syncRunning = true; providerState = { ...providerState, status: 'syncing', lastError: undefined };
   try {
     const credentials = provider;
+    const mapped = (kind: 'live' | 'movie' | 'series', entries: Record<string, unknown>[]) => {
+      const unique = new Map<string, Item>();
+      for (const entry of entries) {
+        const item = mapCatalogItem(kind, entry);
+        if (item && !unique.has(item.id)) unique.set(item.id, asItem(item));
+      }
+      return Array.from(unique.values());
+    };
+    const categoryRecords = (kind: 'live' | 'movie' | 'series', entries: Record<string, unknown>[]) => entries
+      .filter((entry) => entry.category_id !== undefined && entry.category_id !== null)
+      .map((entry) => ({ id: String(entry.category_id), name: String(entry.category_name || entry.name || (kind === 'live' ? 'Live' : kind === 'movie' ? 'Movies' : 'Shows')), kind }));
     const liveGroups = await providerRecords(credentials, 'get_live_categories');
     const liveStreams = await providerRecords(credentials, 'get_live_streams');
+    liveCatalog = mapped('live', liveStreams);
+    categories = categoryRecords('live', liveGroups);
     const movieGroups = await providerRecords(credentials, 'get_vod_categories');
     const movieStreams = await providerRecords(credentials, 'get_vod_streams');
+    movieCatalog = mapped('movie', movieStreams);
+    categories = categories.concat(categoryRecords('movie', movieGroups));
     const seriesGroups = await providerRecords(credentials, 'get_series_categories');
     const seriesStreams = await providerRecords(credentials, 'get_series');
-    const mapped = (kind: 'live' | 'movie' | 'series', entries: Record<string, unknown>[]) => entries
-      .map((entry) => mapCatalogItem(kind, entry)).filter((item): item is CatalogRecord => !!item).map(asItem);
-    const nextLive = mapped('live', liveStreams), nextMovies = mapped('movie', movieStreams), nextSeries = mapped('series', seriesStreams);
-    if (!nextLive.length && !nextMovies.length && !nextSeries.length) throw new Error('Provider returned no catalog items. Check account access and provider response.');
-    movieCatalog = nextMovies; seriesCatalog = nextSeries; liveCatalog = nextLive;
-    categories = [
-      ...liveGroups.map((entry) => ({ id: String(entry.category_id), name: String(entry.category_name || entry.name || 'Live'), kind: 'live' as const })),
-      ...movieGroups.map((entry) => ({ id: String(entry.category_id), name: String(entry.category_name || entry.name || 'Movies'), kind: 'movie' as const })),
-      ...seriesGroups.map((entry) => ({ id: String(entry.category_id), name: String(entry.category_name || entry.name || 'Shows'), kind: 'series' as const }))
-    ];
+    seriesCatalog = mapped('series', seriesStreams);
+    categories = categories.concat(categoryRecords('series', seriesGroups));
+    if (!liveCatalog.length && !movieCatalog.length && !seriesCatalog.length) throw new Error('Provider returned no catalog items. Check account access and provider response.');
     const info = providerPlaybackInfo(credentials, await requestProvider(credentials, ''));
     provider = { ...credentials, ...info };
     episodeCatalog = [];
-    providerState = { status: 'success', lastSuccessAt: new Date().toISOString(), rowCount: nextLive.length + nextMovies.length + nextSeries.length };
+    providerState = { status: 'success', lastSuccessAt: new Date().toISOString(), rowCount: liveCatalog.length + movieCatalog.length + seriesCatalog.length };
   } catch (error) {
     providerState = { ...providerState, status: 'error', lastError: error instanceof Error ? error.message.slice(0, 160) : 'Catalog sync failed.' };
   } finally { syncRunning = false; }
@@ -135,6 +144,36 @@ export function createDemoServer() {
   });
   const device = (request: { headers: Record<string, unknown> }) => String(request.headers['x-device-id']);
   const ownedProfile = (request: { headers: Record<string, unknown> }, id: string) => profiles.find((entry) => entry.id === id && entry.deviceId === device(request));
+  app.get('/api/v1/debug/database', async (request) => {
+    const query = request.query as { q?: string; kind?: string; page?: string; limit?: string };
+    const q = String(query.q || '').trim().toLocaleLowerCase();
+    const allowedKinds = new Set(['movie', 'series', 'live', 'episode']);
+    const kind = allowedKinds.has(String(query.kind)) ? String(query.kind) : '';
+    const pageNumber = Math.max(1, Number(query.page) || 1);
+    const limit = Math.min(100, Math.max(1, Number(query.limit) || 50));
+    const allItems = movieCatalog.concat(seriesCatalog, liveCatalog, episodeCatalog);
+    const filtered = allItems.filter((item) => (!kind || item.kind === kind)
+      && (!q || `${item.title} ${item.description} ${item.id} ${item.categoryId || ''}`.toLocaleLowerCase().includes(q)));
+    const counts = {
+      movie: movieCatalog.length, series: seriesCatalog.length, live: liveCatalog.length,
+      episode: episodeCatalog.length, categories: categories.length
+    };
+    return {
+      backingStore: 'in-memory local demo server', providerStatus: providerState.status,
+      counts, page: pageNumber, limit, total: filtered.length,
+      items: filtered.slice((pageNumber - 1) * limit, pageNumber * limit).map(({ kind: itemKind, id, title, categoryId, genre, releaseYear, posterUrl }) =>
+        ({ kind: itemKind, id, title, categoryId, genre, releaseYear, hasArtwork: !!posterUrl })),
+      schema: [
+        { table: 'provider_config', purpose: 'Encrypted Xtream connection settings', primaryKey: 'id', fields: ['base_url', 'playback_base_url', 'allowed_live_formats', 'username_cipher', 'password_cipher', 'updated_at'] },
+        { table: 'categories', purpose: 'Provider categories by content type', primaryKey: 'kind, id', fields: ['kind', 'id', 'name', 'active', 'last_seen_at'] },
+        { table: 'catalog', purpose: 'Movies, series, live channels, and episodes', primaryKey: 'kind, id', fields: ['kind', 'id', 'parent_id', 'season_number', 'episode_number', 'category_id', 'title', 'description', 'poster_url', 'backdrop_url', 'genre', 'release_year', 'duration_seconds', 'rating', 'added_at', 'stream_extension', 'metadata', 'detail_synced_at', 'active', 'last_seen_at'] },
+        { table: 'profiles', purpose: 'Per-device viewer profiles and preferences', primaryKey: 'id', fields: ['id', 'device_id', 'name', 'preferences', 'created_at'] },
+        { table: 'my_list', purpose: 'Saved titles per profile', primaryKey: 'profile_id, kind, catalog_id', fields: ['profile_id', 'kind', 'catalog_id', 'created_at'] },
+        { table: 'watch_progress', purpose: 'Resume position and completion state', primaryKey: 'profile_id, kind, catalog_id', fields: ['profile_id', 'kind', 'catalog_id', 'position_seconds', 'duration_seconds', 'completed', 'updated_at'] },
+        { table: 'sync_state', purpose: 'Per-dataset sync status and checkpoints', primaryKey: 'dataset', fields: ['dataset', 'status', 'cursor', 'last_attempt_at', 'last_success_at', 'last_error', 'row_count'] }
+      ]
+    };
+  });
   app.post('/api/v1/provider/connect', async (request, reply) => {
     const body = request.body as { baseUrl?: string; username?: string; password?: string };
     if (!body?.baseUrl || !body.username || !body.password) return reply.code(400).send({ error: { message: 'Server URL, username, and password are required.' } });
@@ -152,6 +191,8 @@ export function createDemoServer() {
       const user = root.user_info && typeof root.user_info === 'object' ? root.user_info as Record<string, unknown> : {};
       if (user.auth === 0 || String(user.status || '').toLowerCase() === 'disabled') return reply.code(401).send({ error: { message: 'Provider rejected this login.' } });
       provider = { ...credentials, ...providerPlaybackInfo(credentials, auth) };
+      // Do not leave fictional sample titles on screen while the real catalog syncs.
+      movieCatalog = []; seriesCatalog = []; liveCatalog = []; episodeCatalog = []; categories = [];
       providerState = { status: 'connected' };
       void syncProviderCatalog();
       return { connected: true, username: credentials.username, status: 'syncing' };
@@ -161,6 +202,13 @@ export function createDemoServer() {
     }
   });
   app.get('/api/v1/provider/status', async () => ({ configured: !!provider, username: provider?.username, ...providerState }));
+  app.get('/api/v1/tmdb/status', async () => ({ configured: hasTmdbToken() }));
+  app.post('/api/v1/tmdb/config', async (request, reply) => {
+    const token = String((request.body as { token?: unknown })?.token ?? '').trim();
+    if (token.length > 4096) return reply.code(400).send({ error: { message: 'TMDB token is too long.' } });
+    setTmdbToken(token);
+    return { configured: hasTmdbToken() };
+  });
   app.post('/api/v1/provider/sync', async (_request, reply) => {
     if (!provider) return reply.code(409).send({ error: { message: 'Connect the provider first.' } });
     if (syncRunning) return { status: 'syncing' };
@@ -178,29 +226,22 @@ export function createDemoServer() {
     const activeItems = movieCatalog.concat(seriesCatalog, liveCatalog, episodeCatalog);
     const history = Array.from(progress.entries()).filter(([key, value]) => key.startsWith(`${profileId}:`) && !value.completed)
       .sort((left, right) => right[1].updatedAt - left[1].updatedAt)
-      .map(([, value]) => ({ ...activeItems.find((entry) => entry.id === value.id && entry.kind === value.kind)!, positionSeconds: value.positionSeconds })).filter((item) => item.id);
+      .map(([, value]) => ({ ...activeItems.find((entry) => entry.id === value.id && entry.kind === value.kind)!, positionSeconds: value.positionSeconds }))
+      .filter((item) => item.id && item.kind !== 'live');
     const saved = Array.from(favorites).filter((key) => key.startsWith(`${profileId}:`)).map((key) => {
       const [kind, id] = key.slice(profileId.length + 1).split(':'); return activeItems.find((entry) => entry.kind === kind && entry.id === id);
     }).filter((item): item is Item => !!item);
-    if (provider && providerState.status !== 'demo') return { featured: movieCatalog[0] || seriesCatalog[0] || null, rows: [
-      { id: 'continue', title: 'Continue Watching', items: history.slice(0, 12) },
-      { id: 'my-list', title: 'My List', items: saved.slice(0, 12) },
-      { id: 'recommended-movies', title: 'Movies', items: movieCatalog.slice(0, 12) },
-      { id: 'recommended-series', title: 'Shows', items: seriesCatalog.slice(0, 12) },
-      { id: 'recent-live', title: 'Live TV', items: liveCatalog.slice(0, 12) },
-      ...categories.map((category) => ({ id: `category:${category.kind}:${category.id}`, title: category.name,
-        items: (category.kind === 'movie' ? movieCatalog : category.kind === 'series' ? seriesCatalog : liveCatalog).filter((item) => item.categoryId === category.id).slice(0, 12) }))
-    ] };
-    return { featured: movies[0], rows: [
-      { id: 'continue', title: 'Continue Watching', items: history.slice(0, 12) },
-      { id: 'my-list', title: 'My List', items: saved.slice(0, 12) },
-      { id: 'recommended-movies', title: 'Recommended Movies', items: movies.slice(4, 16) },
-      { id: 'recommended-series', title: 'Recommended Series', items: series.slice(0, 12) },
-      { id: 'recent-movies', title: 'Recently Added Movies', items: movies.slice(0, 12) },
-      { id: 'recent-series', title: 'Recently Added Series', items: series.slice(0, 12) },
-      { id: 'drama', title: 'Drama', items: movies.filter((item) => item.genre === 'Drama') },
-      { id: 'adventure', title: 'Adventure', items: movies.filter((item) => item.genre === 'Adventure') }
-    ] };
+    const libraryMovies = (provider && providerState.status !== 'demo' ? movieCatalog : movies)
+      .filter((item) => item.kind === 'movie').map((item) => ({ ...item, kind: 'movie' as const } satisfies HomeMedia));
+    const librarySeries = (provider && providerState.status !== 'demo' ? seriesCatalog : series)
+      .filter((item) => item.kind === 'series').map((item) => ({ ...item, kind: 'series' as const } satisfies HomeMedia));
+    const discovered = await curatedHome(libraryMovies, librarySeries);
+    return { featured: discovered.featured, discoverySource: discovered.source,
+      attribution: discovered.source === 'tmdb', rows: [
+        { id: 'continue', title: 'Continue Watching', items: history.slice(0, 12) },
+        { id: 'my-list', title: 'My List', items: saved.filter((item) => item?.kind === 'movie' || item?.kind === 'series').slice(0, 12) },
+        ...discovered.rows
+      ].filter((row) => row.items.length) };
   });
   const selected = (items: Item[], query: Record<string, unknown>) => {
     const category = typeof query.category === 'string' ? query.category : '';

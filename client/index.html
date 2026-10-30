@@ -1,27 +1,33 @@
 <!doctype html>
-<html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>StreamCinema</title></head>
+<html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><link rel="icon" type="image/png" href="./icon.png?v=2"/><title>NightOwl</title></head>
 <body class="central-body">
   <div id="central-setup" class="central-setup hidden">
-    <h1>StreamCinema</h1><p>Connect this TV to your local catalog server.</p>
-    <form id="central-form"><label>Server URL<input id="central-url" type="url" placeholder="http://10.42.0.86:8080" required></label>
-      <label>TV access token<input id="central-token" type="password" autocomplete="off" required></label>
-      <button class="primary">Connect</button><p id="central-setup-error" role="status"></p></form>
+    <img class="central-setup-logo" src="./nightowl-logo.png?v=2" alt="NightOwl" width="320" height="82" />
+    <h1>Sign in</h1><p>Sign in to your NightOwl account.</p>
+    <form id="central-form"><label>Username<input id="central-username" type="text" minlength="3" maxlength="64" autocomplete="username" required></label>
+      <label>Password<input id="central-password" type="password" minlength="8" maxlength="256" autocomplete="current-password" required></label>
+      <button class="primary" type="submit">Sign in</button><p id="central-setup-error" role="status"></p></form>
   </div>
   <div id="central-app" class="central-app hidden">
-    <header id="central-header" class="central-header"><div class="central-brand" aria-label="StreamCinema">STREAM<span>CINEMA</span></div>
+    <header id="central-header" class="central-header"><button id="central-profile" class="central-profile" aria-label="Switch user profile" title="Switch user profile"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 21a8 8 0 0 0-16 0M12 13a5 5 0 1 0 0-10 5 5 0 0 0 0 10Z"/></svg></button><img class="central-brand" src="./nightowl-logo.png?v=2" alt="NightOwl" width="220" height="56" />
       <nav id="central-nav" aria-label="Main navigation">
         <button data-view="search" aria-label="Search" class="nav-search"><span class="search-icon" aria-hidden="true"></span> Search</button>
-        <button data-view="home">Home</button><button data-view="series">Shows</button><button data-view="movies">Movies</button>
+        <button data-view="home">Home</button><button data-view="whats-new">What's New</button><button data-view="series">Shows</button><button data-view="movies">Movies</button>
         <button data-view="live">Live TV</button><button data-view="my-list">My Cinema</button>
-      </nav><button id="central-profile" class="central-profile" aria-label="Choose profile">Profile</button>
+      </nav><button id="central-settings-shortcut" class="central-header-settings" data-view="settings" aria-label="Settings" title="Settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.14 12.94c.04-.31.06-.62.06-.94s-.02-.63-.07-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.3 7.3 0 0 0-1.63-.95l-.36-2.54a.5.5 0 0 0-.5-.42h-3.76a.5.5 0 0 0-.5.42L9.26 5.3c-.59.23-1.14.55-1.63.95l-2.39-.96a.5.5 0 0 0-.6.22L2.72 8.83a.5.5 0 0 0 .12.64l2.03 1.58c-.05.31-.07.62-.07.94s.02.63.07.94l-2.03 1.58a.5.5 0 0 0-.12.64l1.92 3.32a.5.5 0 0 0 .6.22l2.39-.96c.49.4 1.04.72 1.63.95l.36 2.54a.5.5 0 0 0 .5.42h3.76a.5.5 0 0 0 .5-.42l.36-2.54c.59-.23 1.14-.55 1.63-.95l2.39.96a.5.5 0 0 0 .6-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58Z"/><circle cx="12" cy="12" r="3"/></svg></button>
     </header>
     <main id="central-main" tabindex="-1"><div id="central-status" class="central-status" role="status"></div><div id="central-content"></div></main>
-    <button id="central-settings-shortcut" class="central-settings-shortcut" data-view="settings" aria-label="Settings" title="Settings">⚙</button>
   </div>
+  <nav id="central-page-scroll-controls" class="central-page-scroll-controls hidden" aria-label="Page scrolling">
+    <button id="central-page-up" aria-label="Scroll up" title="Scroll up"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 15 7-7 7 7"/></svg></button>
+    <button id="central-page-down" aria-label="Scroll down" title="Scroll down"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 9 7 7 7-7"/></svg></button>
+  </nav>
   <div id="central-player" class="central-player hidden"><video id="central-video" playsinline></video>
-    <div class="central-player-ui"><div class="central-player-heading"><button id="central-player-back">← Back</button><strong id="central-playing-title"></strong><span id="central-player-status" role="status"></span></div>
-      <div class="central-player-progress"><span id="central-player-time">0:00</span><div class="central-player-track"><div id="central-player-fill"></div></div><span id="central-player-duration">0:00</span></div>
-      <div class="central-player-actions"><button id="central-rewind">↶ 10</button><button id="central-play-pause">Pause</button><button id="central-forward">10 ↷</button><span class="central-player-spacer"></span>
-        <button id="central-audio">Audio</button><button id="central-subtitle">Subtitles</button></div></div></div>
+    <div class="central-player-center-controls"><button id="central-rewind" aria-label="Back 10 seconds"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M10 8H4V2M4.5 8a12 12 0 1 1-1 12"/><text x="9" y="20">10</text></svg></button><button id="central-play-pause" aria-label="Pause"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M11 7v18M21 7v18"/></svg></button><button id="central-forward" aria-label="Forward 10 seconds"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M22 8h6V2m-.5 6a12 12 0 1 0 1 12"/><text x="9" y="20">10</text></svg></button></div>
+    <div class="central-player-ui"><div class="central-player-heading"><button id="central-player-back" aria-label="Back"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6M9 12h12"/></svg><span>Back</span></button><strong id="central-playing-title"></strong><span id="central-player-status" role="status"></span></div></div>
+    <div class="central-player-progress"><span id="central-player-time">0:00</span><input id="central-player-track" class="central-player-track" type="range" min="0" max="1000" step="1" value="0" aria-label="Seek playback" aria-valuemin="0" aria-valuemax="1000" aria-valuenow="0"/><span id="central-player-duration">0:00</span></div>
+    <div class="central-player-actions"><button id="central-audio" class="player-icon-button" aria-label="Audio and language"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10v4h4l5 4V6l-5 4H3Zm13-2a6 6 0 0 1 0 8m2-11a10 10 0 0 1 0 14"/></svg><span>Audio</span></button><button id="central-subtitle" class="player-icon-button" aria-label="Subtitles"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2.5" y="5" width="19" height="14" rx="2"/><path d="M6 10h5m2 0h5M6 14h3m2 0h7"/></svg><span>Subtitles</span></button><button id="central-fullscreen" class="player-icon-button" aria-label="Fullscreen"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5"/></svg><span>Fullscreen</span></button></div>
+    <div id="central-player-stream-menu" class="central-player-stream-menu hidden" role="dialog" aria-modal="true" aria-label="Choose stream language"><div class="central-player-stream-menu-heading"><strong>Available languages</strong><button id="central-player-stream-close">Close</button></div><div id="central-player-stream-options"></div></div>
+  </div>
   <script type="module" src="/src/main.ts"></script>
 </body></html>

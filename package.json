@@ -7,6 +7,6 @@
     "demo": "pnpm build && pnpm --dir server demo",
     "build": "pnpm --dir server build && pnpm --dir client build",
     "test": "pnpm --dir server test",
-    "package:webos": "pnpm --dir client build && pnpm --dir client exec ares-package dist -o ../packages"
+    "package:webos": "pnpm --dir client build:webos && pnpm --dir client exec ares-package dist -o ../packages"
   }
 }

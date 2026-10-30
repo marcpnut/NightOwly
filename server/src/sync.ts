@@ -60,6 +60,9 @@ async function syncDataset(client: pg.PoolClient, provider: ProviderCredentials,
     }
     if (!count) throw new Error('No valid provider records; previous catalog retained.');
     await client.query(`UPDATE catalog SET active=false WHERE kind=$1 AND last_seen_at < $2`, [dataset.kind, started]);
+    await client.query(`UPDATE provider_streams SET active=false WHERE kind=$1 AND last_seen_at < $2`, [dataset.kind, started]);
+    await client.query(`UPDATE media_items m SET active=false,updated_at=now() WHERE m.kind=$1 AND NOT EXISTS
+      (SELECT 1 FROM provider_streams ps WHERE ps.media_item_id=m.id AND ps.active)`, [dataset.kind]);
     if (categories.length) await client.query(`UPDATE categories SET active=false WHERE kind=$1 AND last_seen_at < $2`, [dataset.kind, started]);
     await updateStatus(client, dataset.kind, 'success', undefined, count, '0');
   } catch (error) {
