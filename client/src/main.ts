@@ -1,5 +1,59 @@
 import './style.css';
 
+// LG webOS 4.5 ships Chromium 53. Keep the webOS bundle clear of newer DOM
+// helpers that are absent there. New browsers and the browser build are left
+// untouched.
+if (document.body.classList.contains('webos-client')) {
+  const legacyElementPrototype = Element.prototype as unknown as {
+    append?: (...items: Array<Node | string>) => void;
+    replaceWith?: (...items: Array<Node | string>) => void;
+    scrollBy?: (options: ScrollToOptions | number, y?: number) => void;
+    scrollIntoView: (options?: boolean | ScrollIntoViewOptions) => void;
+  };
+  if (typeof legacyElementPrototype.append !== 'function') {
+    Object.defineProperty(Element.prototype, 'append', { configurable: true, writable: true, value: function(this: Element, ...items: Array<Node | string>): void {
+      items.forEach((item) => this.appendChild(typeof item === 'string' ? document.createTextNode(item) : item));
+    }});
+  }
+  if (typeof legacyElementPrototype.replaceWith !== 'function') {
+    Object.defineProperty(Element.prototype, 'replaceWith', { configurable: true, writable: true, value: function(this: Element, ...items: Array<Node | string>): void {
+      const parent = this.parentNode;
+      if (!parent) return;
+      const replacement = document.createDocumentFragment();
+      items.forEach((item) => replacement.appendChild(typeof item === 'string' ? document.createTextNode(item) : item));
+      parent.replaceChild(replacement, this);
+    }});
+  }
+  Object.defineProperty(Element.prototype, 'scrollBy', { configurable: true, writable: true, value: function(this: Element, options: ScrollToOptions | number, y?: number): void {
+    const left = typeof options === 'number' ? options : options.left ?? 0;
+    const top = typeof options === 'number' ? y ?? 0 : options.top ?? 0;
+    this.scrollLeft += left; this.scrollTop += top;
+  }});
+  const nativeScrollIntoView = legacyElementPrototype.scrollIntoView;
+  Object.defineProperty(Element.prototype, 'scrollIntoView', { configurable: true, writable: true, value: function(this: Element, options?: boolean | ScrollIntoViewOptions): void {
+    if (!options || typeof options !== 'object' || options.block !== 'nearest' && options.inline !== 'nearest') {
+      nativeScrollIntoView.call(this, options);
+      return;
+    }
+    let ancestor = this.parentElement;
+    while (ancestor) {
+      const style = getComputedStyle(ancestor);
+      const scrollsVertically = /(auto|scroll)/.test(style.overflowY) && ancestor.scrollHeight > ancestor.clientHeight;
+      const scrollsHorizontally = /(auto|scroll)/.test(style.overflowX) && ancestor.scrollWidth > ancestor.clientWidth;
+      const item = this.getBoundingClientRect();
+      const bounds = ancestor.getBoundingClientRect();
+      if (scrollsVertically && item.top < bounds.top) ancestor.scrollTop += item.top - bounds.top;
+      else if (scrollsVertically && item.bottom > bounds.bottom) ancestor.scrollTop += item.bottom - bounds.bottom;
+      if (scrollsHorizontally && item.left < bounds.left) ancestor.scrollLeft += item.left - bounds.left;
+      else if (scrollsHorizontally && item.right > bounds.right) ancestor.scrollLeft += item.right - bounds.right;
+      ancestor = ancestor.parentElement;
+    }
+    const bounds = this.getBoundingClientRect();
+    if (bounds.top < 0) window.scrollTo(window.scrollX, window.scrollY + bounds.top);
+    else if (bounds.bottom > window.innerHeight) window.scrollTo(window.scrollX, window.scrollY + bounds.bottom - window.innerHeight);
+  }});
+}
+
 type Kind = 'movie' | 'series' | 'live' | 'episode';
 type DescriptionStatus = 'available' | 'none' | 'unavailable';
 type Item = { kind: Kind; id: string; title: string; description?: string; posterUrl?: string; backdropUrl?: string;
@@ -174,6 +228,7 @@ function updatePageScrollControls(): void {
     pageUpButton.style.bottom = 'auto';
   }
 }
+function scrollWindowTo(top: number): void { window.scrollTo(window.scrollX, top); }
 let headerFadeFrame = 0;
 function updateHeaderTextFade(): void {
   headerFadeFrame = 0;
@@ -205,8 +260,8 @@ function movePage(direction: -1 | 1): void {
     liveGrid.scrollBy({ top: direction * Math.max(220, liveGrid.clientHeight * .8), behavior: 'smooth' });
     return;
   }
-  window.scrollTo({ top: Math.max(0, Math.min(document.documentElement.scrollHeight - window.innerHeight,
-    window.scrollY + direction * Math.max(320, window.innerHeight * 0.78))), behavior: 'smooth' });
+    scrollWindowTo(Math.max(0, Math.min(document.documentElement.scrollHeight - window.innerHeight,
+      window.scrollY + direction * Math.max(320, window.innerHeight * 0.78))));
 }
 pageUpButton.onclick = () => movePage(-1);
 pageDownButton.onclick = () => movePage(1);
@@ -374,8 +429,8 @@ function navigate(next: View): void {
   document.body.classList.toggle('settings-open', next === 'settings');
   document.documentElement.classList.toggle('search-open', next === 'search');
   document.body.classList.toggle('search-open', next === 'search');
-  if (next === 'settings' || next === 'search') window.scrollTo({ top: 0, behavior: 'auto' });
-  if (next === 'profiles') window.scrollTo({ top: 0, behavior: 'auto' });
+  if (next === 'settings' || next === 'search') scrollWindowTo(0);
+  if (next === 'profiles') scrollWindowTo(0);
   if (next !== 'detail' && next !== 'profiles') previousView = next;
   view = next;
   clear(content);
@@ -389,7 +444,7 @@ function navigate(next: View): void {
     cachedViews.delete(next);
     content.appendChild(cached.content);
     activeCategoryPageScrollHandler = categoryViewScrollHandlers.get(next) ?? null;
-    window.scrollTo({ top: cached.scrollY, behavior: 'auto' });
+    scrollWindowTo(cached.scrollY);
     window.requestAnimationFrame(() => activeCategoryPageScrollHandler?.());
   } else {
     cachedViews.delete(next);
@@ -481,7 +536,7 @@ function focusShelfCard(target: HTMLButtonElement, shelf: HTMLElement): void {
     if (isLastLoadedShelf) {
       const scrolling = document.scrollingElement ?? document.documentElement;
       const pageHeight = Math.max(scrolling.scrollHeight, document.body.scrollHeight, content.scrollHeight);
-      window.scrollTo({ top: Math.max(0, pageHeight - window.innerHeight), behavior: 'smooth' });
+      scrollWindowTo(Math.max(0, pageHeight - window.innerHeight));
       return;
     }
     const menuBottom = document.getElementById('central-header')?.getBoundingClientRect().bottom ?? 88;
@@ -489,7 +544,7 @@ function focusShelfCard(target: HTMLButtonElement, shelf: HTMLElement): void {
     const safeBottom = window.innerHeight - 40;
     const rect = shelf.getBoundingClientRect();
     const delta = rect.top < safeTop ? rect.top - safeTop : rect.bottom > safeBottom ? rect.bottom - safeBottom : 0;
-    if (delta) window.scrollBy({ top: delta, behavior: 'smooth' });
+    if (delta) scrollWindowTo(window.scrollY + delta);
   });
 }
 function row(title: string, items: Item[], maxItems = 20): HTMLElement {
@@ -783,7 +838,7 @@ function liveCategoryCode(name: string): string {
 async function showList(section: 'movies' | 'series' | 'live', append = false, category = selectedCategoryBySection[section], country = section === 'live' ? selectedLiveCountry : '', search = section === 'live' ? selectedLiveSearch : ''): Promise<void> {
   if (section !== 'live' && !append) { await showMediaShelves(section); return; }
   if (section === 'live' && !append) {
-    window.scrollTo({ top: 0, behavior: 'auto' });
+    scrollWindowTo(0);
     if (content.querySelector('.central-live-preview')) resetInlineLiveVideo();
   }
   if (section === 'live' && category && hiddenLiveCategoryIds.has(category)) category = '';
@@ -1218,7 +1273,7 @@ async function openItem(item: Item): Promise<void> {
   }
   lastFocus = document.activeElement as HTMLElement;
   restoreCardKey = `${item.kind}:${item.id}`;
-  window.scrollTo({ top: 0, behavior: 'auto' });
+  scrollWindowTo(0);
   view = 'detail'; clear(content); app.classList.add('detail-open'); setStatus('Loading details…');
   try {
     const detail = await api<Item>(`/${item.kind === 'movie' ? 'movies' : 'series'}/${item.id}?language=${encodeURIComponent(appLanguage)}`);
@@ -2212,7 +2267,7 @@ document.addEventListener('keydown', (event) => {
   }
   if (!playerOpen && key === 38 && active?.closest('.central-hero')) {
     const activeTab = document.querySelector<HTMLButtonElement>(`#central-nav [data-view="${view}"]`);
-    if (activeTab) { event.preventDefault(); activeTab.focus(); window.scrollTo({ top: 0, behavior: 'smooth' }); return; }
+    if (activeTab) { event.preventDefault(); activeTab.focus(); scrollWindowTo(0); return; }
   }
   if (!playerOpen && (key === 38 || key === 40)) {
     if (key === 40 && active?.dataset.moreCategories === 'true') { event.preventDefault(); return; }
@@ -2240,10 +2295,10 @@ document.addEventListener('keydown', (event) => {
       if (key === 38 && rowIndex === 0) {
         const featuredAction = content.querySelector<HTMLButtonElement>('.central-hero-actions .primary');
         if (featuredAction) {
-          event.preventDefault(); featuredAction.focus(); window.scrollTo({ top: 0, behavior: 'smooth' }); return;
+          event.preventDefault(); featuredAction.focus(); scrollWindowTo(0); return;
         }
         const activeTab = document.querySelector<HTMLButtonElement>(`#central-nav [data-view="${view}"]`);
-        if (activeTab) { event.preventDefault(); activeTab.focus(); window.scrollTo({ top: 0, behavior: 'smooth' }); return; }
+        if (activeTab) { event.preventDefault(); activeTab.focus(); scrollWindowTo(0); return; }
       } else {
         if (key === 40 && rowIndex === rows.length - 1) {
           const moreCategories = content.querySelector<HTMLElement>('[data-more-categories="true"]');

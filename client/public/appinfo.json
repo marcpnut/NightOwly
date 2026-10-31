@@ -1,6 +1,6 @@
 {
   "id": "com.streamcinema.iptv",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "vendor": "NightOwl",
   "type": "web",
   "main": "index.html",
