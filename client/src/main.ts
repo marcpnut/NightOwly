@@ -335,6 +335,19 @@ async function loginWithAccount(username: string, password: string): Promise<Con
   if (!result.accessToken) throw new Error('The server did not return a sign-in session.');
   return { url, token: result.accessToken };
 }
+function fitWebosLivePreview(): void {
+  if (!document.body.classList.contains('webos-client')) return;
+  const showcase = content.querySelector<HTMLElement>('.central-live-showcase');
+  const preview = showcase?.querySelector<HTMLElement>('.central-live-preview');
+  if (!showcase || !preview) return;
+  const availableWidth = showcase.clientWidth;
+  const availableHeight = showcase.clientHeight;
+  if (availableWidth <= 0 || availableHeight <= 0) return;
+  const width = Math.floor(Math.min(availableWidth, availableHeight * 16 / 9));
+  preview.style.width = `${width}px`;
+  preview.style.height = `${Math.floor(width * 9 / 16)}px`;
+}
+window.addEventListener('resize', () => window.requestAnimationFrame(fitWebosLivePreview));
 function cancelRequest(): void { for (const controller of activeControllers) controller.abort(); activeControllers.clear(); requestGeneration += 1; }
 function navigate(next: View): void {
   if (view === 'live' && next !== 'live') resetInlineLiveVideo();
@@ -992,7 +1005,10 @@ async function showList(section: 'movies' | 'series' | 'live', append = false, c
     if (liveScreen) liveScreen.appendChild(categoryBar); else content.appendChild(categoryBar);
     const grid = node('div', section === 'live' ? 'central-grid central-live-grid' : 'central-grid');
     loadedItems.forEach((item) => grid.appendChild(section === 'live' ? makeLiveCard(item) : card(item)));
-    if (liveScreen) { liveScreen.appendChild(grid); content.appendChild(liveScreen); }
+    if (liveScreen) {
+      liveScreen.appendChild(grid); content.appendChild(liveScreen);
+      if (section === 'live') window.requestAnimationFrame(fitWebosLivePreview);
+    }
     else content.appendChild(grid);
     if (section === 'live') grid.scrollTop = 0;
     liveGrid = section === 'live' ? grid : null;
