@@ -142,6 +142,18 @@ let livePreviewSourceFormat: 'm3u8' | 'ts' = 'm3u8';
 let page = 1;
 let loadedItems: Item[] = [];
 const selectedCategoryBySection: Record<'movies' | 'series' | 'live', string> = { movies: '', series: '', live: '' };
+const lastFocusedCategoryBySection: Record<'movies' | 'series' | 'live', string> = { movies: '', series: '', live: '' };
+const lastFocusedShelfCardBySection: Record<'movies' | 'series' | 'live', HTMLButtonElement | null> = { movies: null, series: null, live: null };
+content.addEventListener('focusin', (event) => {
+  const focusedCard = (event.target as HTMLElement | null)?.closest<HTMLButtonElement>('.central-card[data-card-key]');
+  if (!focusedCard) return;
+  const section = view === 'movies' || view === 'series' || view === 'live' ? view : null;
+  if (!section) return;
+  lastFocusedShelfCardBySection[section] = focusedCard;
+  const categoryId = focusedCard.closest<HTMLElement>('.central-row[data-category-id]')?.dataset.categoryId
+    || (section === 'live' ? selectedCategoryBySection.live : '');
+  if (categoryId) lastFocusedCategoryBySection[section] = categoryId;
+});
 let selectedLiveCountry = '';
 let hiddenLiveCategoryIds = (() => {
   try { const saved = JSON.parse(localStorage.getItem('streamcinema.hidden-live-categories') || '[]') as unknown; return new Set(Array.isArray(saved) ? saved.filter((id): id is string => typeof id === 'string') : []); }
@@ -785,13 +797,19 @@ function addCategoryJumpMenu(section: 'movies' | 'series' | 'live', categories: 
   const list = node('div', 'central-category-jump-list');
   panel.append(heading, list);
   const state = { section, toggle, panel, list, categories, open: (): void => undefined, close: (): void => undefined } as CategoryJumpMenuState;
+  let suppressOpenOnFocus = false;
   const closeMenu = (returnFocus = true): void => {
     panel.classList.remove('open'); toggle.classList.remove('is-open'); toggle.setAttribute('aria-expanded', 'false');
-    if (returnFocus) toggle.focus();
+    if (!returnFocus) return;
+    const shelfCard = lastFocusedShelfCardBySection[section];
+    if (shelfCard?.isConnected) focusWithoutMovingScroll(shelfCard);
+    else { suppressOpenOnFocus = true; toggle.focus(); suppressOpenOnFocus = false; }
   };
   const openMenu = (): void => {
     panel.classList.add('open'); toggle.classList.add('is-open'); toggle.setAttribute('aria-expanded', 'true');
-    const preferred = list.querySelector<HTMLButtonElement>('[aria-current="true"]') ?? list.querySelector<HTMLButtonElement>('button');
+    const preferredId = lastFocusedCategoryBySection[section] || selectedCategoryBySection[section];
+    const preferred = Array.from(list.querySelectorAll<HTMLButtonElement>('.central-category-jump-option'))
+      .find((option) => option.dataset.categoryId === preferredId) ?? list.querySelector<HTMLButtonElement>('button');
     preferred?.focus();
   };
   state.open = openMenu; state.close = closeMenu; activeCategoryJumpMenu = state;
@@ -800,16 +818,25 @@ function addCategoryJumpMenu(section: 'movies' | 'series' | 'live', categories: 
     categories.forEach((category) => {
       const option = node('button', 'central-category-jump-option', category.name) as HTMLButtonElement;
       option.type = 'button'; option.dataset.categoryId = category.id;
-      option.setAttribute('aria-current', category.id === selectedCategoryBySection[section] ? 'true' : 'false');
+      option.setAttribute('aria-current', category.id === (lastFocusedCategoryBySection[section] || selectedCategoryBySection[section]) ? 'true' : 'false');
+      option.setAttribute('aria-selected', category.id === selectedCategoryBySection[section] ? 'true' : 'false');
+      option.onfocus = () => {
+        lastFocusedCategoryBySection[section] = category.id;
+        list.querySelectorAll<HTMLButtonElement>('.central-category-jump-option').forEach((entry) => entry.setAttribute('aria-current', entry.dataset.categoryId === category.id ? 'true' : 'false'));
+      };
       option.onclick = () => {
         selectedCategoryBySection[section] = category.id;
-        list.querySelectorAll<HTMLButtonElement>('.central-category-jump-option').forEach((entry) => entry.setAttribute('aria-current', entry.dataset.categoryId === category.id ? 'true' : 'false'));
+        list.querySelectorAll<HTMLButtonElement>('.central-category-jump-option').forEach((entry) => {
+          entry.setAttribute('aria-selected', entry.dataset.categoryId === category.id ? 'true' : 'false');
+        });
         closeMenu(false); void selectCategory(category);
       };
       list.appendChild(option);
     });
   };
-  renderItems(); toggle.onclick = () => panel.classList.contains('open') ? closeMenu() : openMenu(); close.onclick = () => closeMenu();
+  renderItems();
+  toggle.onfocus = () => { if (!suppressOpenOnFocus) openMenu(); };
+  toggle.onclick = openMenu; close.onclick = () => closeMenu();
   panel.addEventListener('keydown', (event) => {
     const active = document.activeElement as HTMLElement | null;
     const options = Array.from(list.querySelectorAll<HTMLButtonElement>('button'));
@@ -817,14 +844,11 @@ function addCategoryJumpMenu(section: 'movies' | 'series' | 'live', categories: 
     if (event.key === 'Escape' || event.key === 'Backspace' || event.keyCode === 461 || event.keyCode === 10009) {
       event.preventDefault(); event.stopPropagation(); closeMenu(); return;
     }
-    if (event.key === 'ArrowLeft') { event.preventDefault(); event.stopPropagation(); closeMenu(); return; }
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); event.stopPropagation(); closeMenu(); return; }
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       const next = options[index + (event.key === 'ArrowDown' ? 1 : -1)];
       if (next) { event.preventDefault(); event.stopPropagation(); next.focus(); next.scrollIntoView({ block: 'nearest' }); }
       return;
-    }
-    if (event.key === 'ArrowRight') {
-      if (active instanceof HTMLButtonElement && active.dataset.categoryId) { event.preventDefault(); event.stopPropagation(); active.click(); }
     }
   });
   (panel as HTMLElement & { categoryJumpState?: CategoryJumpMenuState }).categoryJumpState = state;
