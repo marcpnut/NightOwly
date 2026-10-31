@@ -692,30 +692,30 @@ function focusReturnedCard(root: HTMLElement): void {
   restoreCardKey = '';
 }
 function focusShelfCard(target: HTMLButtonElement, shelf: HTMLElement): void {
-  target.focus();
-  window.requestAnimationFrame(() => {
-    if (!shelf.isConnected) return;
-    const rows = Array.from(content.querySelectorAll<HTMLElement>('.central-row'));
-    const isLastLoadedShelf = rows[rows.length - 1] === shelf && !content.querySelector('[data-more-categories="true"]');
-    if (isLastLoadedShelf) {
-      const scrolling = document.scrollingElement ?? document.documentElement;
-      const pageHeight = Math.max(scrolling.scrollHeight, document.body.scrollHeight, content.scrollHeight);
-      scrollWindowTo(Math.max(0, pageHeight - window.innerHeight));
-      return;
-    }
+  if (!shelf.isConnected) return;
+  // Start the viewport move in the same event frame as focus changes, so the
+  // highlighted card travels with its row instead of appearing detached first.
+  const rows = Array.from(content.querySelectorAll<HTMLElement>('.central-row'));
+  const isLastLoadedShelf = rows[rows.length - 1] === shelf && !content.querySelector('[data-more-categories="true"]');
+  if (isLastLoadedShelf) {
+    const scrolling = document.scrollingElement ?? document.documentElement;
+    const pageHeight = Math.max(scrolling.scrollHeight, document.body.scrollHeight, content.scrollHeight);
+    scrollWindowTo(Math.max(0, pageHeight - window.innerHeight));
+  } else {
     const menuBottom = document.getElementById('central-header')?.getBoundingClientRect().bottom ?? 88;
     if (document.body.classList.contains('webos-client')) {
       const safeTop = menuBottom + 18;
       const rect = shelf.getBoundingClientRect();
       if (Math.abs(rect.top - safeTop) > 2) scrollWindowTo(Math.max(0, window.scrollY + rect.top - safeTop));
-      return;
+    } else {
+      const safeTop = menuBottom + 20;
+      const safeBottom = window.innerHeight - 40;
+      const rect = shelf.getBoundingClientRect();
+      const delta = rect.top < safeTop ? rect.top - safeTop : rect.bottom > safeBottom ? rect.bottom - safeBottom : 0;
+      if (delta) scrollWindowTo(window.scrollY + delta);
     }
-    const safeTop = menuBottom + 20;
-    const safeBottom = window.innerHeight - 40;
-    const rect = shelf.getBoundingClientRect();
-    const delta = rect.top < safeTop ? rect.top - safeTop : rect.bottom > safeBottom ? rect.bottom - safeBottom : 0;
-    if (delta) scrollWindowTo(window.scrollY + delta);
-  });
+  }
+  target.focus();
 }
 function focusShelfItem(list: HTMLElement, target: HTMLButtonElement): void {
   target.focus();
