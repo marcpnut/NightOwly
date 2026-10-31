@@ -385,9 +385,9 @@ export async function getNormalizedDetail(kind: 'movie' | 'series', providerId: 
         ORDER BY (title_lang.code=$3) DESC,(title_lang.code='en') DESC,title_tx.language_id LIMIT 1),t.original_title)`)} AS title,
       COALESCE(NULLIF(tx.description,''),(SELECT x.description FROM sc_title_translations x
         WHERE x.title_id=t.id AND NULLIF(x.description,'') IS NOT NULL
-        ORDER BY (x.language_id=(SELECT id FROM sc_languages WHERE code=$3)) DESC,(x.language_id=(SELECT id FROM sc_languages WHERE code='en')) DESC,
+        ORDER BY (x.language_id=(SELECT id FROM sc_languages WHERE code='en')) DESC,
           (x.language_id=(SELECT id FROM sc_languages WHERE code='nl')) DESC,(x.language_id=(SELECT id FROM sc_languages WHERE code='pl')) DESC,
-          (x.source='tmdb') DESC,x.language_id LIMIT 1),
+          (x.language_id=(SELECT id FROM sc_languages WHERE code=$3)) DESC,(x.source='tmdb') DESC,x.language_id LIMIT 1),
         (SELECT COALESCE(NULLIF(s.raw_payload#>>'{info,plot}',''),NULLIF(s.raw_payload->>'plot',''),
             NULLIF(s.raw_payload#>>'{info,description}',''),NULLIF(s.raw_payload->>'description',''),
             NULLIF(s.raw_payload#>>'{info,overview}',''),NULLIF(s.raw_payload->>'overview',''))
@@ -396,10 +396,10 @@ export async function getNormalizedDetail(kind: 'movie' | 'series', providerId: 
             AND COALESCE(NULLIF(s.raw_payload#>>'{info,plot}',''),NULLIF(s.raw_payload->>'plot',''),
               NULLIF(s.raw_payload#>>'{info,description}',''),NULLIF(s.raw_payload->>'description',''),
               NULLIF(s.raw_payload#>>'{info,overview}',''),NULLIF(s.raw_payload->>'overview','')) IS NOT NULL
-          ORDER BY (source_ps.language_id=(SELECT id FROM sc_languages WHERE code=$3)) DESC,
-            (source_ps.language_id=(SELECT id FROM sc_languages WHERE code='en')) DESC,
+          ORDER BY (source_ps.language_id=(SELECT id FROM sc_languages WHERE code='en')) DESC,
             (source_ps.language_id=(SELECT id FROM sc_languages WHERE code='nl')) DESC,
             (source_ps.language_id=(SELECT id FROM sc_languages WHERE code='pl')) DESC,
+            (source_ps.language_id=(SELECT id FROM sc_languages WHERE code=$3)) DESC,
             (source_ps.provider_id=ps.provider_id) DESC,source_ps.provider_id LIMIT 1)) AS description,
       tx.tagline AS tagline,tx.trailer_id AS "trailerId",
       COALESCE(tx.poster_url,t.poster_url) AS "posterUrl",t.backdrop_url AS "backdropUrl",
@@ -418,7 +418,8 @@ export async function getNormalizedDetail(kind: 'movie' | 'series', providerId: 
     FROM sc_provider_streams ps JOIN sc_titles t ON t.id=ps.title_id
     LEFT JOIN sc_languages l ON l.id=ps.language_id
     LEFT JOIN LATERAL (SELECT tx.* FROM sc_title_translations tx JOIN sc_languages tl ON tl.id=tx.language_id
-      WHERE tx.title_id=t.id ORDER BY (NULLIF(tx.description,'') IS NOT NULL) DESC,(tl.code='en') DESC,(tl.code='nl') DESC,(tl.code='pl') DESC,(tl.code=$3) DESC,
+      WHERE tx.title_id=t.id ORDER BY (NULLIF(tx.description,'') IS NOT NULL) DESC,(tl.code='en') DESC,(tl.code='nl') DESC,(tl.code='pl') DESC,
+        (tl.code=$3) DESC,
         (tx.source='tmdb') DESC,tx.language_id LIMIT 1) tx ON true
     WHERE ps.kind=$1 AND ps.provider_id=$2 AND ps.active AND t.kind=$1 LIMIT 1`, [kind, providerId, languageCode]);
   return rows[0] ?? null;

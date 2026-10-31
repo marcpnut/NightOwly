@@ -414,9 +414,9 @@ export function makeApi(options: { apiToken: string; credentialKey: Buffer }) {
       const language = z.object({ language: z.string().regex(/^[a-z]{2}$/).default('en') }).parse(request.query).language;
       const series = await getNormalizedSeriesTitle(params.id);
       if (series) {
-        const metadataLanguages = language === 'en'
-          ? (await pool.query<{ code: string }>(`SELECT code FROM sc_languages WHERE code=ANY($1::text[])`, [['en', 'nl', 'pl']])).rows.map((row) => row.code)
-          : [language];
+        const metadataLanguages = (await pool.query<{ code: string }>(
+          `SELECT code FROM sc_languages WHERE code=ANY($1::text[])`, [['en', 'nl', 'pl']])).rows.map((row) => row.code);
+        if (metadataLanguages.length === 0) metadataLanguages.push(language);
         await Promise.all(metadataLanguages.map((code) => ensureTmdbSeasonMetadata(series.id, params.season, code)));
       }
       const items = await listNormalizedEpisodes(params.id, params.season, query.page, query.limit, language);
