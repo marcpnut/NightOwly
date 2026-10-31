@@ -1,11 +1,11 @@
 # NightOwl for LG webOS TV
 
-Version 0.2.4 is the C9 compatibility candidate for LG webOS TV 4.5 / Chromium 53. It adds compatibility shims for modern DOM calls missing from Chromium 53, which affected Home, Settings, and the two-press exit prompt. Focus rings follow rounded control corners, dropdowns use the NightOwl theme, and Live TV preview sizing keeps the 16:9 ratio. Previews start muted so TV autoplay restrictions do not block the video.
+Version 0.2.5 is packaged for LG webOS TVs including the C9. It fixes Settings rendering on older Chromium and adjusts Live TV, Search, and title rows for older webOS sizing support. Preview sizing keeps a centered 16:9 ratio. Previews start muted so TV autoplay restrictions do not block the video.
 
-Download [`NightOwl-webos-c9-0.2.4.ipk`](NightOwl-webos-c9-0.2.4.ipk) and install it using the webOS TV CLI after pairing the TV in Developer Mode:
+Download [`NightOwl-webos-c9-0.2.5.ipk`](NightOwl-webos-c9-0.2.5.ipk) and install it using the webOS TV CLI after pairing the TV in Developer Mode:
 
 ```powershell
-ares-install --device <your-device-name> .\NightOwl-webos-c9-0.2.4.ipk
+ares-install --device <your-device-name> .\NightOwl-webos-c9-0.2.5.ipk
 ```
 
 The app connects to `https://[redacted]`. Sign in with the NightOwl account created by the administrator. Xtream credentials remain in the server Settings page.

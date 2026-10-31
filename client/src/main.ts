@@ -7,6 +7,7 @@ if (document.body.classList.contains('webos-client')) {
   const legacyElementPrototype = Element.prototype as unknown as {
     append?: (...items: Array<Node | string>) => void;
     replaceWith?: (...items: Array<Node | string>) => void;
+    replaceChildren?: (...items: Array<Node | string>) => void;
     scrollBy?: (options: ScrollToOptions | number, y?: number) => void;
     scrollIntoView: (options?: boolean | ScrollIntoViewOptions) => void;
   };
@@ -22,6 +23,12 @@ if (document.body.classList.contains('webos-client')) {
       const replacement = document.createDocumentFragment();
       items.forEach((item) => replacement.appendChild(typeof item === 'string' ? document.createTextNode(item) : item));
       parent.replaceChild(replacement, this);
+    }});
+  }
+  if (typeof legacyElementPrototype.replaceChildren !== 'function') {
+    Object.defineProperty(Element.prototype, 'replaceChildren', { configurable: true, writable: true, value: function(this: Element, ...items: Array<Node | string>): void {
+      while (this.firstChild) this.removeChild(this.firstChild);
+      items.forEach((item) => this.appendChild(typeof item === 'string' ? document.createTextNode(item) : item));
     }});
   }
   Object.defineProperty(Element.prototype, 'scrollBy', { configurable: true, writable: true, value: function(this: Element, options: ScrollToOptions | number, y?: number): void {

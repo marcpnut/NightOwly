@@ -304,3 +304,27 @@ html.settings-open,body.settings-open,html.search-open,body.search-open{height:1
 @media(max-width:850px) and (orientation:landscape){.central-settings-layout{align-items:stretch}.central-settings-nav-item{flex:none}}
 .central-whats-new-title{margin:0;padding:clamp(92px,11vh,126px) 4.2% 0;font-size:clamp(34px,4vw,56px);line-height:1.05;font-weight:900;text-shadow:0 2px 12px #000}.central-whats-new-note{margin:10px 0 26px;padding:0 4.2%;color:#c5c5c5;font-size:16px}.central-whats-new-empty{margin:24px 4.2%;color:#ccc}
 .central-card-episode-series{bottom:55px;max-height:2.1em}.central-card-episode-subtitle{position:absolute;z-index:1;left:15px;right:12px;bottom:11px;max-height:2.4em;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden;color:#ddd;font-size:13px;line-height:1.15;font-weight:700;text-shadow:0 2px 8px #000}.central-episode.central-episode-new{border-color:var(--brand-cyan);box-shadow:inset 0 0 0 1px var(--brand-cyan),0 0 14px rgba(26,219,255,.24)}
+
+/* Fixed-size C9 layout fallbacks: older webOS Chromium lacks clamp(), modern
+   aspect-ratio, dvh and flex-gap support. Keep browser layout untouched. */
+.webos-client .central-card{box-sizing:border-box;width:18.5vw;min-width:240px;max-width:360px;height:10.45vw;min-height:138px;max-height:210px;flex:0 0 18.5vw;flex-shrink:0}
+.webos-client .central-cards{gap:0;padding-right:4.2%}
+.webos-client .central-cards>.central-card{margin-right:12px}
+.webos-client .central-settings{height:100vh;padding-top:102px}
+.webos-client .central-settings-layout{display:flex;gap:0;padding-left:10px}
+.webos-client .central-settings-sidebar{display:flex;flex:0 0 250px;width:250px;flex-direction:column;gap:5px}
+.webos-client .central-settings-pages{flex:1 1 auto;width:0;min-width:0}
+.webos-client .central-settings-live-category-grid{display:flex;flex-wrap:wrap;gap:0;margin:14px 0 22px}
+.webos-client .central-settings-live-category-option{flex:0 0 24%;width:24%;margin:0 .5% 8px}
+.webos-client .central-search-page{display:flex;height:100vh;flex-direction:column;padding-top:102px}
+.webos-client .central-search-page>.central-search-results{display:flex;flex:1 1 auto;flex-wrap:wrap;align-content:flex-start;align-items:flex-start;gap:0;height:0;min-height:0;padding:12px 20px 24px}
+.webos-client .central-search-page>.central-search-results>.central-card{flex:0 0 19%;width:19%;height:10.7vw;min-height:108px;max-height:203px;margin:0 .5% 14px;aspect-ratio:auto}
+.webos-client .central-app.live-tv-open{height:100vh}
+.webos-client .central-app.live-tv-open main,.webos-client .central-app.live-tv-open #central-content{height:100%;min-height:0}
+.webos-client .central-live-screen{display:flex;height:100vh;flex-direction:column;gap:12px;padding:88px 4.2% 18px}
+.webos-client .central-live-showcase{display:flex;flex:1 1 auto;min-height:0;height:0;align-items:center;justify-content:center}
+.webos-client .central-live-grid{display:flex;flex:0 0 24vh;flex-flow:row wrap;align-content:flex-start;align-items:flex-start;justify-content:space-between;box-sizing:border-box;width:100%;height:24vh;min-height:0;max-height:24vh;gap:0;padding:14px 16px 18px;overflow-x:hidden;overflow-y:auto}
+.webos-client .central-live-grid>.central-card{flex:0 0 calc(16.666% - 8px);width:calc(16.666% - 8px);height:calc((24vh - 56px)/2);min-width:0;min-height:0;max-width:none;max-height:none;margin:0 0 12px;aspect-ratio:auto}
+.webos-client .central-live-category-bar{flex:0 0 auto}
+@media(max-width:900px){.webos-client .central-card{width:28vw;min-width:180px;height:15.75vw;min-height:100px;flex-basis:28vw}.webos-client .central-search-page>.central-search-results>.central-card{flex-basis:32%;width:32%;height:18vw;margin-right:.66%;margin-left:.66%}.webos-client .central-live-grid>.central-card{flex-basis:calc(16.666% - 5px);width:calc(16.666% - 5px)}}
+@media(max-width:600px){.webos-client .central-settings{padding-top:74px}.webos-client .central-settings-layout{flex-direction:column;gap:8px}.webos-client .central-settings-sidebar{display:flex;flex:0 0 auto;width:100%;height:auto;max-height:190px;flex-flow:row wrap;overflow-y:auto}.webos-client .central-settings-group-label{flex:0 0 100%}.webos-client .central-settings-nav-item{flex:0 0 49%;width:49%}.webos-client .central-settings-pages{flex:1 1 auto;width:100%;height:0}.webos-client .central-live-grid{flex-basis:25vh;height:25vh;max-height:25vh}.webos-client .central-live-grid>.central-card{height:calc((25vh - 56px)/2)}}
