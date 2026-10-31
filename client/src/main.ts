@@ -396,7 +396,14 @@ function updatePageScrollControls(): void {
     pageUpButton.style.bottom = 'auto';
   }
 }
-function scrollWindowTo(top: number): void { window.scrollTo(window.scrollX, top); }
+function scrollWindowTo(top: number, instant = false): void {
+  if (!instant) { window.scrollTo(window.scrollX, top); return; }
+  const root = document.documentElement;
+  const previousBehavior = root.style.scrollBehavior;
+  root.style.scrollBehavior = 'auto';
+  window.scrollTo(window.scrollX, top);
+  root.style.scrollBehavior = previousBehavior;
+}
 let headerFadeFrame = 0;
 function updateHeaderTextFade(): void {
   headerFadeFrame = 0;
@@ -734,7 +741,7 @@ function focusShelfCard(target: HTMLButtonElement, shelf: HTMLElement, alignAtTo
       if (requiredBottomSpace > currentBottomSpace) (shelf.parentElement as HTMLElement).style.paddingBottom = `${requiredBottomSpace}px`;
     }
     const rect = shelf.getBoundingClientRect();
-    scrollWindowTo(Math.max(0, window.scrollY + rect.top - safeTop));
+    scrollWindowTo(Math.max(0, window.scrollY + rect.top - safeTop), true);
     return;
   }
   if (isLastLoadedShelf) {
@@ -1018,7 +1025,7 @@ async function showMediaShelves(section: 'movies' | 'series'): Promise<void> {
         const currentBottomSpace = Number.parseFloat(categoryShelfContainer.style.paddingBottom) || 0;
         if (requiredBottomSpace > currentBottomSpace) categoryShelfContainer.style.paddingBottom = `${requiredBottomSpace}px`;
       }
-      scrollWindowTo(Math.max(0, window.scrollY + element.getBoundingClientRect().top - safeTop));
+      scrollWindowTo(Math.max(0, window.scrollY + element.getBoundingClientRect().top - safeTop), true);
     };
     const onCategoryPageScroll = (): void => {
       if (view !== section || !categoryShelfContainer.isConnected) return;
