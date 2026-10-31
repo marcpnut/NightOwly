@@ -719,13 +719,24 @@ function focusWithoutMovingScroll(target: HTMLElement): void {
   if (window.scrollX !== windowLeft || window.scrollY !== windowTop) window.scrollTo(windowLeft, windowTop);
   root.style.scrollBehavior = oldBehavior;
 }
-function focusShelfCard(target: HTMLButtonElement, shelf: HTMLElement): void {
+function focusShelfCard(target: HTMLButtonElement, shelf: HTMLElement, alignAtTop = false): void {
   if (!shelf.isConnected) return;
   focusWithoutMovingScroll(target);
   // Start the viewport move in the same event frame as focus changes, so the
   // highlighted card travels with its row instead of appearing detached first.
   const rows = Array.from(content.querySelectorAll<HTMLElement>('.central-row'));
   const isLastLoadedShelf = rows[rows.length - 1] === shelf && !content.querySelector('[data-more-categories="true"]');
+  if (alignAtTop) {
+    const safeTop = (document.getElementById('central-header')?.getBoundingClientRect().bottom ?? 88) + 18;
+    if (isLastLoadedShelf && shelf.parentElement) {
+      const requiredBottomSpace = Math.max(0, window.innerHeight - safeTop - shelf.getBoundingClientRect().height + 24);
+      const currentBottomSpace = Number.parseFloat((shelf.parentElement as HTMLElement).style.paddingBottom) || 0;
+      if (requiredBottomSpace > currentBottomSpace) (shelf.parentElement as HTMLElement).style.paddingBottom = `${requiredBottomSpace}px`;
+    }
+    const rect = shelf.getBoundingClientRect();
+    scrollWindowTo(Math.max(0, window.scrollY + rect.top - safeTop));
+    return;
+  }
   if (isLastLoadedShelf) {
     const scrolling = document.scrollingElement ?? document.documentElement;
     const pageHeight = Math.max(scrolling.scrollHeight, document.body.scrollHeight, content.scrollHeight);
@@ -959,16 +970,16 @@ async function showMediaShelves(section: 'movies' | 'series'): Promise<void> {
       });
       return bestIndex;
     };
-    const trimCategoryCache = (referenceIndex = categoryReferenceIndex()): void => {
+    const trimCategoryCache = (referenceIndex = categoryReferenceIndex(), protectedRecord?: CategoryRowRecord): void => {
       let mounted = categoryRows.filter((record) => record.row);
       while (mounted.length > 20) {
-        const victim = mounted.filter((record) => !record.row?.contains(document.activeElement))
+        const victim = mounted.filter((record) => record !== protectedRecord && !record.row?.contains(document.activeElement))
           .sort((a, b) => Math.abs(categoryRows.indexOf(b) - referenceIndex) - Math.abs(categoryRows.indexOf(a) - referenceIndex))[0];
         if (!victim) break;
         unmountCategoryRow(victim); mounted = categoryRows.filter((record) => record.row);
       }
     };
-    const loadCategoryRow = async (record: CategoryRowRecord): Promise<void> => {
+    const loadCategoryRow = async (record: CategoryRowRecord, protectFromTrim = false): Promise<void> => {
       if (record.loading || record.row || view !== section) return;
       record.loading = true;
       try {
@@ -978,7 +989,7 @@ async function showMediaShelves(section: 'movies' | 'series'): Promise<void> {
           const playlist = makeCategoryPlaylist(record.group, firstPage);
           const next = categoryRows.slice(categoryRows.indexOf(record) + 1).map((entry) => entry.row ?? entry.spacer).find((element): element is HTMLElement => Boolean(element));
           attachCategoryRow(record, playlist, next ?? categorySentinel);
-          trimCategoryCache(categoryReferenceIndex());
+          trimCategoryCache(categoryReferenceIndex(), protectFromTrim ? record : undefined);
         } else record.spacer?.remove();
       } catch { /* Retry when the spacer returns into the preload window. */ }
       finally { record.loading = false; }
@@ -1044,11 +1055,14 @@ async function showMediaShelves(section: 'movies' | 'series'): Promise<void> {
       }
       const record = categoryRows.find((entry) => entry.group.id === group.id);
       if (!record) return;
-      if (record.spacer) await loadCategoryRow(record);
+      if (record.spacer) await loadCategoryRow(record, true);
       const targetRow = record.row;
       const firstCard = targetRow?.querySelector<HTMLButtonElement>('[data-card-key]');
-      if (targetRow && firstCard) focusShelfCard(firstCard, targetRow);
-      else if (targetRow) targetRow.scrollIntoView({ block: 'start' });
+      if (targetRow && firstCard) focusShelfCard(firstCard, targetRow, true);
+      else if (targetRow) {
+        const safeTop = (document.getElementById('central-header')?.getBoundingClientRect().bottom ?? 88) + 18;
+        scrollWindowTo(Math.max(0, window.scrollY + targetRow.getBoundingClientRect().top - safeTop));
+      }
     });
     setStatus('');
     (content.querySelector<HTMLButtonElement>('.central-hero-actions button')
