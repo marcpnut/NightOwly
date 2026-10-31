@@ -144,6 +144,11 @@ html,body,*{scrollbar-width:none!important;-ms-overflow-style:none!important}*::
 @media(max-width:650px){.central-player-heading{top:calc(3% + 14px + env(safe-area-inset-top, 0px));left:calc(4% + 12px + env(safe-area-inset-left, 0px));right:calc(4% + 12px + env(safe-area-inset-right, 0px))}}
 .central-shelf .central-cards{padding-left:12px;padding-right:12px;scroll-padding-left:12px;scroll-padding-right:12px}
 .central-shelf .central-card:hover,.central-shelf .central-card:focus{z-index:6}
+/* Keep keyboard/remote focus visually attached to the card being navigated.
+   Smooth scrolling and scale transitions otherwise make the row move ahead
+   of the focus ring, especially on older webOS Chromium. */
+.central-shelf .central-cards{scroll-behavior:auto}
+.central-shelf .central-card:focus{transition:none}
 @media(max-width:650px){.central-shelf .central-cards{padding-left:9px;padding-right:9px;scroll-padding-left:9px;scroll-padding-right:9px}}
 .central-player-progress{z-index:8;bottom:118px;left:6%;right:6%;min-height:30px;padding:4px 6px;border-radius:5px;background:linear-gradient(90deg,rgba(0,0,0,.4),rgba(0,0,0,.18));}
 .central-player-track{height:8px;background:rgba(255,255,255,.78);border:1px solid rgba(255,255,255,.8);box-shadow:0 1px 7px rgba(0,0,0,.8)}
