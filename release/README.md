@@ -1,11 +1,11 @@
 # NightOwl for LG webOS TV
 
-Version 0.2.7 is packaged for LG webOS TVs including the C9. Horizontal shelf navigation advances through cards, preloads upcoming pages, and keeps focus off shelf controls. The exit prompt traps focus on Stay and Exit. Live TV cards navigate horizontally within each row. Styled dropdown menus replace the platform popup controls, and the What's New heading clears the menu bar. It also includes the Settings, Live TV, Search, and title row compatibility fixes from 0.2.5. Preview sizing keeps a centered 16:9 ratio. Previews start muted so TV autoplay restrictions do not block the video.
+Version 0.2.8 is packaged for LG webOS TVs including the C9. Live TV previews play with audio, and the redundant fullscreen button is hidden in the TV player. Shelf browsing pages the row while keeping the next card visible, with clear side gutters. Vertical navigation keeps the focused row at the top and shows the final row at the bottom. The Live TV channel grid keeps both rows clear of its edges. It also includes the exit focus trap, styled dropdowns, and Settings, Search, and title row compatibility fixes.
 
-Download [`NightOwl-webos-c9-0.2.7.ipk`](NightOwl-webos-c9-0.2.7.ipk) and install it using the webOS TV CLI after pairing the TV in Developer Mode:
+Download [`NightOwl-webos-c9-0.2.8.ipk`](NightOwl-webos-c9-0.2.8.ipk) and install it using the webOS TV CLI after pairing the TV in Developer Mode:
 
 ```powershell
-ares-install --device <your-device-name> .\NightOwl-webos-c9-0.2.7.ipk
+ares-install --device <your-device-name> .\NightOwl-webos-c9-0.2.8.ipk
 ```
 
 The app connects to `https://[redacted]`. Sign in with the NightOwl account created by the administrator. Xtream credentials remain in the server Settings page.

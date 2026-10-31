@@ -628,6 +628,12 @@ function focusShelfCard(target: HTMLButtonElement, shelf: HTMLElement): void {
       return;
     }
     const menuBottom = document.getElementById('central-header')?.getBoundingClientRect().bottom ?? 88;
+    if (document.body.classList.contains('webos-client')) {
+      const safeTop = menuBottom + 18;
+      const rect = shelf.getBoundingClientRect();
+      if (Math.abs(rect.top - safeTop) > 2) scrollWindowTo(Math.max(0, window.scrollY + rect.top - safeTop));
+      return;
+    }
     const safeTop = menuBottom + 20;
     const safeBottom = window.innerHeight - 40;
     const rect = shelf.getBoundingClientRect();
@@ -639,8 +645,12 @@ function focusShelfItem(list: HTMLElement, target: HTMLButtonElement): void {
   target.focus();
   const listRect = list.getBoundingClientRect();
   const cardRect = target.getBoundingClientRect();
-  if (cardRect.right > listRect.right) list.scrollLeft += cardRect.right - listRect.right + 14;
-  else if (cardRect.left < listRect.left) list.scrollLeft -= listRect.left - cardRect.left + 14;
+  const webos = document.body.classList.contains('webos-client');
+  const visibleLeft = listRect.left + (webos ? 48 : 12);
+  const visibleRight = listRect.right - (webos ? 56 : 12);
+  if (cardRect.right > visibleRight || cardRect.left < visibleLeft) {
+    list.scrollLeft += cardRect.left - visibleLeft;
+  }
 }
 function row(title: string, items: Item[], maxItems = 20): HTMLElement {
   const section = node('section', 'central-row');
@@ -1015,9 +1025,8 @@ async function showList(section: 'movies' | 'series' | 'live', append = false, c
         livePreviewSourceUrl = '';
         livePreviewSourceFormat = 'm3u8';
         previewStatus.textContent = 'Connecting to channel…';
-        // webOS 4.5 blocks audible autoplay after the async stream lookup. Start
-        // the inline preview muted; opening fullscreen restores channel audio.
-        video.muted = true;
+        // Keep the inline TV preview audible like the selected stream.
+        video.muted = false;
         video.pause(); video.removeAttribute('src'); video.load();
         video.classList.add('central-inline-video'); video.classList.remove('central-inline-playing');
         preview.appendChild(video);
@@ -2033,7 +2042,7 @@ function updatePlayerOptionVisibility(): void {
   player.classList.toggle('live-playback', live);
   el('central-audio').classList.toggle('hidden', live);
   el('central-subtitle').classList.toggle('hidden', live);
-  el('central-fullscreen').classList.remove('hidden');
+  el('central-fullscreen').classList.toggle('hidden', document.body.classList.contains('webos-client'));
 }
 seekTrack.addEventListener('input', () => {
   if (!Number.isFinite(video.duration) || video.duration <= 0) return;
@@ -2432,6 +2441,14 @@ document.addEventListener('keydown', (event) => {
     const rows = Array.from(content.querySelectorAll<HTMLElement>('.central-row'));
     const rowIndex = activeRow ? rows.indexOf(activeRow) : -1;
     if (rowIndex >= 0) {
+      if (document.body.classList.contains('webos-client') && key === 40 && rowIndex === rows.length - 1
+        && !content.querySelector('[data-more-categories="true"]')) {
+        event.preventDefault();
+        const scrolling = document.scrollingElement ?? document.documentElement;
+        const pageHeight = Math.max(scrolling.scrollHeight, document.body.scrollHeight, content.scrollHeight);
+        scrollWindowTo(Math.max(0, pageHeight - window.innerHeight));
+        return;
+      }
       // Wrap from the bottom of the category list only after every category
       // has been appended. Before that, Up must always mean the previous row.
       const allCategoriesLoaded = !content.querySelector('[data-more-categories="true"]');
