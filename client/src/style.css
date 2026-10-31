@@ -343,6 +343,7 @@ html.settings-open,body.settings-open,html.search-open,body.search-open{height:1
 .webos-client .central-series-browser .central-season-picker .central-more{flex:none;width:100%;margin:0 0 8px;padding:12px 14px;text-align:left}
 .webos-client .central-series-browser .central-episode-pane{flex:1 1 auto;width:0}
 .webos-client .central-episode-container{width:100%;min-width:0;min-height:0;height:100%;max-height:100%;overflow-x:hidden;overflow-y:auto}
+.webos-client .central-detail-poster{top:50%;right:8%;width:18vw;min-width:180px;max-width:310px;height:27vw;min-height:270px;max-height:465px;transform:translateY(-50%);aspect-ratio:auto;object-fit:cover}
 .webos-client .central-settings-layout{display:flex;gap:0;padding-left:10px}
 .webos-client .central-settings-sidebar{display:flex;flex:0 0 250px;width:250px;flex-direction:column;gap:5px}
 .webos-client .central-settings-pages{flex:1 1 auto;width:0;min-width:0}

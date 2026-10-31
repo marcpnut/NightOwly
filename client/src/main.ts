@@ -1483,12 +1483,13 @@ async function openItem(item: Item): Promise<void> {
       image.src = detailBackdrops[sourceIndex]; layout.appendChild(image);
     }
     const detailPosters = [...imageUrls(detail.posterUrl), ...imageUrls(item.posterUrl)];
-    if (detailPosters.length) { const poster = node('img', 'central-detail-poster'); poster.src = detailPosters[0]; poster.alt = `${detail.title} poster`; poster.onerror = () => poster.remove(); layout.appendChild(poster); }
+    const displayTitle = normalizeDisplayTitle(item.title || detail.title);
+    if (detailPosters.length) { const poster = node('img', 'central-detail-poster'); poster.src = detailPosters[0]; poster.alt = `${displayTitle} poster`; poster.onerror = () => poster.remove(); layout.appendChild(poster); }
     const body = node('div', 'central-detail-body');
     const back = node('button', 'central-detail-back', '←  Back') as HTMLButtonElement;
     back.onclick = () => backFromDetail(); body.appendChild(back);
     body.appendChild(node('div', 'central-hero-eyebrow', detail.kind === 'series' ? 'SERIES' : 'FILM'));
-    body.appendChild(node('h1', undefined, normalizeDisplayTitle(detail.title)));
+    body.appendChild(node('h1', undefined, displayTitle));
     const meta = [detail.releaseYear, detail.genre, detail.durationSeconds ? `${Math.round(detail.durationSeconds / 60)} min` : ''].filter(Boolean).join(' · ');
     body.appendChild(node('div', 'central-detail-meta', meta));
     const description = detail.description?.trim() || item.description?.trim();
@@ -2604,7 +2605,11 @@ document.addEventListener('keydown', (event) => {
   if (!current) return;
   const menuOpen = playerOpen && !el('central-player-stream-menu').classList.contains('hidden');
   const scope = menuOpen ? '#central-player-stream-menu' : playerOpen ? '#central-player' : '#central-app';
-  const buttons = Array.from(document.querySelectorAll<HTMLElement>(`${scope} button:not([disabled]), ${scope} input:not([disabled]), ${scope} select:not([disabled]), ${scope} textarea:not([disabled]), ${scope} [role="slider"][tabindex="0"]`)).filter((button) => button.offsetParent !== null && button !== active);
+  const buttons = Array.from(document.querySelectorAll<HTMLElement>(`${scope} button:not([disabled]), ${scope} input:not([disabled]), ${scope} select:not(.webos-native-select):not([disabled]), ${scope} textarea:not([disabled]), ${scope} [role="slider"][tabindex="0"]`)).filter((button) => {
+    if (button.offsetParent === null || button === active) return false;
+    const style = getComputedStyle(button);
+    return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+  });
   const cx = current.left + current.width / 2, cy = current.top + current.height / 2;
   let best: HTMLElement | null = null, score = Infinity;
   for (const button of buttons) {

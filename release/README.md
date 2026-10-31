@@ -1,11 +1,11 @@
 # NightOwl for LG webOS TV
 
-Version 0.3.1 is packaged for LG webOS TVs including the C9. The custom language and category dropdowns now open only after OK/Enter, keep their menu styling consistently, and render above clipped panels. Pointer hover transfers focus to the hovered card so only one tile shows the cyan focus ring. The series view shows scroll arrows independently for the season and episode lists, only when each list can scroll in that direction. Descriptions prefer English, then Dutch, then Polish when the translation exists. This version also includes the C9 series layout, audible Live TV preview, shelf navigation, Settings, Search, and exit-focus fixes.
+Version 0.3.2 is packaged for LG webOS TVs including the C9. Arrows move focus to a language or category dropdown without changing its value; press OK/Enter to open it. Dropdown options render above clipped panels with consistent styling. Movie detail headings reuse the selected card's normalized title. Movie posters keep a portrait 2:3 size on C9. Pointer hover transfers focus to the hovered card so only one tile shows the cyan focus ring. The series view shows scroll arrows independently for the season and episode lists, only when each list can scroll in that direction. Descriptions prefer English, then Dutch, then Polish when the translation exists.
 
-Download [`NightOwl-webos-c9-0.3.1.ipk`](NightOwl-webos-c9-0.3.1.ipk) and install it using the webOS TV CLI after pairing the TV in Developer Mode:
+Download [`NightOwl-webos-c9-0.3.2.ipk`](NightOwl-webos-c9-0.3.2.ipk) and install it using the webOS TV CLI after pairing the TV in Developer Mode:
 
 ```powershell
-ares-install --device <your-device-name> .\NightOwl-webos-c9-0.3.1.ipk
+ares-install --device <your-device-name> .\NightOwl-webos-c9-0.3.2.ipk
 ```
 
 The app connects to `https://[redacted]`. Sign in with the NightOwl account created by the administrator. Xtream credentials remain in the server Settings page.
