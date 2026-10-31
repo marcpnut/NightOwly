@@ -78,6 +78,8 @@ type Config = { url: string; token: string };
 type View = 'home' | 'whats-new' | 'movies' | 'series' | 'live' | 'my-list' | 'search' | 'settings' | 'detail' | 'profiles' | 'database';
 
 const el = <T extends HTMLElement = HTMLElement>(id: string): T => document.getElementById(id) as T;
+const centralFullscreenButton = el<HTMLButtonElement>('central-fullscreen');
+if (document.body.classList.contains('webos-client')) centralFullscreenButton.parentNode?.removeChild(centralFullscreenButton);
 const setup = el('central-setup');
 const app = el('central-app');
 const content = el('central-content');
@@ -608,6 +610,7 @@ function card(item: Item): HTMLButtonElement {
     button.appendChild(progress);
   }
   button.onclick = () => void openItem(item);
+  if (document.body.classList.contains('webos-client')) button.addEventListener('mouseenter', () => button.focus());
   return button;
 }
 function focusReturnedCard(root: HTMLElement): void {
@@ -648,9 +651,8 @@ function focusShelfItem(list: HTMLElement, target: HTMLButtonElement): void {
   const webos = document.body.classList.contains('webos-client');
   const visibleLeft = listRect.left + (webos ? 48 : 12);
   const visibleRight = listRect.right - (webos ? 56 : 12);
-  if (cardRect.right > visibleRight || cardRect.left < visibleLeft) {
-    list.scrollLeft += cardRect.left - visibleLeft;
-  }
+  if (cardRect.right > visibleRight) list.scrollLeft += cardRect.right - visibleRight + 8;
+  else if (cardRect.left < visibleLeft) list.scrollLeft -= visibleLeft - cardRect.left + 8;
 }
 function row(title: string, items: Item[], maxItems = 20): HTMLElement {
   const section = node('section', 'central-row');
@@ -688,19 +690,22 @@ function playlistRow(title: string, firstPage: CatalogPage, loadPage?: (page: nu
   const list = node('div', 'central-cards');
   firstPage.items.slice(0, 20).forEach((item) => list.appendChild(card(item)));
   addShelfControls(section, list);
-  let page = 1, hasMore = firstPage.hasMore, loadingPage: Promise<void> | null = null;
+  let page = 1, hasMore = firstPage.hasMore, pageHasMore = firstPage.hasMore;
+  let pendingItems: Item[] = [], loadingPage: Promise<void> | null = null;
   const appendNextPage = (): Promise<void> => {
     if (!loadPage || !hasMore) return Promise.resolve();
     if (loadingPage) return loadingPage;
     loadingPage = (async () => {
       try {
-        const next = await loadPage(page + 1);
-        if (!next.items.length) hasMore = false;
-        else {
-          page += 1; hasMore = next.hasMore;
-          const cards = next.items.map((item) => card(item));
-          cards.forEach((itemCard) => list.appendChild(itemCard));
+        if (!pendingItems.length) {
+          if (!pageHasMore) { hasMore = false; return; }
+          const next = await loadPage(page + 1);
+          if (!next.items.length) { pageHasMore = false; hasMore = false; return; }
+          page += 1; pageHasMore = next.hasMore; pendingItems = next.items.slice();
         }
+        const nextItems = pendingItems.splice(0, 5);
+        nextItems.map((item) => card(item)).forEach((itemCard) => list.appendChild(itemCard));
+        hasMore = pendingItems.length > 0 || pageHasMore;
       } catch { /* Keep the current shelf responsive and retry when it is scrolled again. */ }
       finally { loadingPage = null; }
     })();
@@ -2042,7 +2047,7 @@ function updatePlayerOptionVisibility(): void {
   player.classList.toggle('live-playback', live);
   el('central-audio').classList.toggle('hidden', live);
   el('central-subtitle').classList.toggle('hidden', live);
-  el('central-fullscreen').classList.toggle('hidden', document.body.classList.contains('webos-client'));
+  if (centralFullscreenButton.isConnected) centralFullscreenButton.classList.remove('hidden');
 }
 seekTrack.addEventListener('input', () => {
   if (!Number.isFinite(video.duration) || video.duration <= 0) return;
@@ -2108,7 +2113,7 @@ function showStreamLanguageMenu(): void {
 }
 el<HTMLButtonElement>('central-audio').onclick = showStreamLanguageMenu;
 el<HTMLButtonElement>('central-player-stream-close').onclick = () => { el('central-player-stream-menu').classList.add('hidden'); el<HTMLButtonElement>('central-audio').focus(); revealPlayerControls(); };
-el<HTMLButtonElement>('central-fullscreen').onclick = () => {
+centralFullscreenButton.onclick = () => {
   const playerWithWebkit = player as HTMLElement & { webkitRequestFullscreen?: () => void };
   const videoWithWebkit = video as HTMLVideoElement & { webkitEnterFullscreen?: () => void };
   const documentWithWebkit = document as Document & { webkitFullscreenElement?: Element | null; webkitExitFullscreen?: () => void };

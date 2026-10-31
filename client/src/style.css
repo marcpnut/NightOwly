@@ -324,8 +324,10 @@ html.settings-open,body.settings-open,html.search-open,body.search-open{height:1
 .webos-client .central-card{box-sizing:border-box;width:18.5vw;min-width:240px;max-width:360px;height:10.45vw;min-height:138px;max-height:210px;flex:0 0 18.5vw;flex-shrink:0}
 .webos-client .central-cards{gap:0;padding-right:4.2%}
 .webos-client .central-cards>.central-card{margin-right:12px}
-.webos-client .central-shelf .central-cards{padding-left:48px;padding-right:56px;scroll-padding-left:48px;scroll-padding-right:56px}
+.webos-client .central-shelf .central-cards{display:flex;flex-flow:row nowrap;width:100%;min-width:0;overflow-x:auto;overflow-y:hidden;padding-left:48px;padding-right:56px;scroll-padding-left:48px;scroll-padding-right:56px}
 .webos-client .central-shelf-arrow{z-index:3}
+.webos-client #central-fullscreen{display:none!important}
+.webos-client #central-app .central-card:hover{border-color:var(--brand-cyan)!important;box-shadow:0 0 0 2px var(--brand-cyan),0 10px 35px rgba(0,0,0,.9)!important;z-index:6}
 .webos-client .central-settings{height:100vh;padding-top:102px}
 .webos-client .central-settings-layout{display:flex;gap:0;padding-left:10px}
 .webos-client .central-settings-sidebar{display:flex;flex:0 0 250px;width:250px;flex-direction:column;gap:5px}
