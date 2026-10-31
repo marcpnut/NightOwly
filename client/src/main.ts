@@ -251,9 +251,32 @@ function enhanceWebosSelects(root: ParentNode): void {
     const menu = node('div', 'webos-select-menu'); menu.setAttribute('role', 'listbox'); menu.setAttribute('aria-label', select.getAttribute('aria-label') || 'Options');
     const options = (): HTMLButtonElement[] => Array.from(menu.querySelectorAll<HTMLButtonElement>('[role="option"]'));
     const selectedIndex = (): number => Math.max(0, options().findIndex((option) => option.dataset.value === select.value));
-    const close = (returnFocus = false): void => {
-      wrapper.classList.remove('is-open'); trigger.setAttribute('aria-expanded', 'false');
+    const isOpen = (): boolean => menu.classList.contains('is-open');
+    const positionMenu = (): void => {
+      if (!isOpen()) return;
+      const rect = trigger.getBoundingClientRect();
+      const width = Math.max(120, Math.min(rect.width, window.innerWidth - 16));
+      menu.style.width = `${width}px`;
+      menu.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - width - 8))}px`;
+      const menuHeight = menu.getBoundingClientRect().height;
+      const below = rect.bottom + 7;
+      menu.style.top = `${below + menuHeight <= window.innerHeight - 8 ? below : Math.max(8, rect.top - menuHeight - 7)}px`;
+    };
+    let close = (_returnFocus = false): void => undefined;
+    const outsideClick = (event: MouseEvent): void => {
+      const target = event.target;
+      if (target instanceof Node && !wrapper.contains(target) && !menu.contains(target)) close();
+    };
+    const closeOnBlur = (): void => { window.setTimeout(() => {
+      if (!wrapper.contains(document.activeElement) && !menu.contains(document.activeElement)) close();
+    }, 0); };
+    close = (returnFocus = false): void => {
+      menu.classList.remove('is-open'); wrapper.classList.remove('is-open'); trigger.setAttribute('aria-expanded', 'false');
+      document.removeEventListener('click', outsideClick);
+      document.removeEventListener('scroll', positionMenu, true);
+      window.removeEventListener('resize', positionMenu);
       if (returnFocus) trigger.focus();
+      menu.remove();
     };
     const choose = (option: HTMLButtonElement): void => {
       select.value = option.dataset.value ?? '';
@@ -277,17 +300,29 @@ function enhanceWebosSelects(root: ParentNode): void {
       options().forEach((candidate) => candidate.setAttribute('aria-selected', `${candidate === active}`));
     };
     const open = (index = selectedIndex()): void => {
-      rebuild(); wrapper.classList.add('is-open'); trigger.setAttribute('aria-expanded', 'true');
+      rebuild(); document.body.appendChild(menu);
+      wrapper.classList.add('is-open'); menu.classList.add('is-open'); trigger.setAttribute('aria-expanded', 'true');
+      positionMenu();
+      document.addEventListener('click', outsideClick);
+      document.addEventListener('scroll', positionMenu, true);
+      window.addEventListener('resize', positionMenu);
       const option = options()[Math.max(0, Math.min(options().length - 1, index))];
       option?.focus(); option?.scrollIntoView({ block: 'nearest' });
     };
-    trigger.onclick = () => wrapper.classList.contains('is-open') ? close() : open();
+    trigger.onclick = () => isOpen() ? close(true) : open();
     wrapper.addEventListener('keydown', (event) => {
+      const key = event.keyCode;
+      if (event.target === trigger && (key === 13 || key === 23 || key === 32)) {
+        event.preventDefault(); event.stopImmediatePropagation();
+        if (isOpen()) close(true); else open();
+      }
+    });
+    menu.addEventListener('keydown', (event) => {
       const key = event.keyCode;
       const activeOptions = options();
       const activeIndex = activeOptions.indexOf(document.activeElement as HTMLButtonElement);
       const isBack = [461, 10009, 8, 27].includes(key) || ['Escape', 'BrowserBack'].includes(event.key);
-      if (wrapper.classList.contains('is-open')) {
+      if (isOpen()) {
         if (isBack) { event.preventDefault(); event.stopImmediatePropagation(); close(true); return; }
         if (key === 38 || key === 40) {
           event.preventDefault(); event.stopImmediatePropagation();
@@ -299,14 +334,11 @@ function enhanceWebosSelects(root: ParentNode): void {
           if (activeIndex >= 0) choose(activeOptions[activeIndex]); else close(true);
           return;
         }
-      } else if (event.target === trigger && (key === 13 || key === 23 || key === 32 || key === 38 || key === 40)) {
-        event.preventDefault(); event.stopImmediatePropagation(); open();
       }
     });
-    wrapper.addEventListener('focusout', () => window.setTimeout(() => {
-      if (!wrapper.contains(document.activeElement)) close();
-    }, 0));
-    parent.insertBefore(wrapper, select); wrapper.appendChild(trigger); wrapper.appendChild(menu); wrapper.appendChild(select);
+    wrapper.addEventListener('focusout', closeOnBlur);
+    menu.addEventListener('focusout', closeOnBlur);
+    parent.insertBefore(wrapper, select); wrapper.appendChild(trigger); wrapper.appendChild(select);
     select.classList.add('webos-native-select');
     select.tabIndex = -1; select.setAttribute('aria-hidden', 'true');
     select.addEventListener('change', rebuild);
