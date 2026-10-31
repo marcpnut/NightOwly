@@ -249,7 +249,9 @@ export async function listCatalog(kind: 'movie' | 'series' | 'live', page: numbe
         ORDER BY CASE WHEN lp.code='en' THEN 0 WHEN lp.code='und' OR lp.code IS NULL THEN 2 ELSE 1 END,ps.id LIMIT 1) p ON true
       LEFT JOIN sc_languages lang ON lang.id=p.language_id
       LEFT JOIN LATERAL (SELECT tx.* FROM sc_title_translations tx JOIN sc_languages tl ON tl.id=tx.language_id
-        WHERE tx.title_id=t.id ORDER BY (tl.code=$6) DESC,(tl.code='en') DESC,(tx.source='tmdb') DESC,tx.language_id LIMIT 1) tr ON true
+        WHERE tx.title_id=t.id ORDER BY (NULLIF(tx.description,'') IS NOT NULL) DESC,
+          (tl.code='en') DESC,(tl.code='nl') DESC,(tl.code='pl') DESC,(tl.code=$6) DESC,
+          (tx.source='tmdb') DESC,tx.language_id LIMIT 1) tr ON true
       WHERE t.kind=$1
         AND ($2::text IS NULL OR (
           ($1='live' AND EXISTS(SELECT 1 FROM sc_stream_categories live_sc
@@ -337,8 +339,10 @@ export async function getCatalog(kind: string, id: string) {
       FROM sc_provider_streams ps JOIN sc_titles t ON t.id=ps.title_id
       LEFT JOIN sc_languages l ON l.id=ps.language_id
       LEFT JOIN sc_series_episodes se ON se.episode_title_id=t.id
-      LEFT JOIN LATERAL (SELECT tx.* FROM sc_title_translations tx WHERE tx.title_id=t.id
-        ORDER BY (tx.language_id=(SELECT id FROM sc_languages WHERE code='en')) DESC,(tx.source='tmdb') DESC,tx.language_id LIMIT 1) tx ON true
+      LEFT JOIN LATERAL (SELECT tx.* FROM sc_title_translations tx LEFT JOIN sc_languages tl ON tl.id=tx.language_id WHERE tx.title_id=t.id
+        ORDER BY (NULLIF(tx.description,'') IS NOT NULL) DESC,(tl.code='en') DESC,
+          (tl.code='nl') DESC,(tl.code='pl') DESC,
+          (tx.source='tmdb') DESC,tx.language_id LIMIT 1) tx ON true
       WHERE ps.kind=$1 AND ps.provider_id=$2 AND ps.active LIMIT 1`, [kind, id]);
     return rows[0] ?? null;
   }
@@ -382,6 +386,7 @@ export async function getNormalizedDetail(kind: 'movie' | 'series', providerId: 
       COALESCE(NULLIF(tx.description,''),(SELECT x.description FROM sc_title_translations x
         WHERE x.title_id=t.id AND NULLIF(x.description,'') IS NOT NULL
         ORDER BY (x.language_id=(SELECT id FROM sc_languages WHERE code=$3)) DESC,(x.language_id=(SELECT id FROM sc_languages WHERE code='en')) DESC,
+          (x.language_id=(SELECT id FROM sc_languages WHERE code='nl')) DESC,(x.language_id=(SELECT id FROM sc_languages WHERE code='pl')) DESC,
           (x.source='tmdb') DESC,x.language_id LIMIT 1),
         (SELECT COALESCE(NULLIF(s.raw_payload#>>'{info,plot}',''),NULLIF(s.raw_payload->>'plot',''),
             NULLIF(s.raw_payload#>>'{info,description}',''),NULLIF(s.raw_payload->>'description',''),
@@ -391,9 +396,11 @@ export async function getNormalizedDetail(kind: 'movie' | 'series', providerId: 
             AND COALESCE(NULLIF(s.raw_payload#>>'{info,plot}',''),NULLIF(s.raw_payload->>'plot',''),
               NULLIF(s.raw_payload#>>'{info,description}',''),NULLIF(s.raw_payload->>'description',''),
               NULLIF(s.raw_payload#>>'{info,overview}',''),NULLIF(s.raw_payload->>'overview','')) IS NOT NULL
-          ORDER BY (source_ps.provider_id=ps.provider_id) DESC,
-            (source_ps.language_id=(SELECT id FROM sc_languages WHERE code=$3)) DESC,
-            (source_ps.language_id=(SELECT id FROM sc_languages WHERE code='en')) DESC,source_ps.provider_id LIMIT 1)) AS description,
+          ORDER BY (source_ps.language_id=(SELECT id FROM sc_languages WHERE code=$3)) DESC,
+            (source_ps.language_id=(SELECT id FROM sc_languages WHERE code='en')) DESC,
+            (source_ps.language_id=(SELECT id FROM sc_languages WHERE code='nl')) DESC,
+            (source_ps.language_id=(SELECT id FROM sc_languages WHERE code='pl')) DESC,
+            (source_ps.provider_id=ps.provider_id) DESC,source_ps.provider_id LIMIT 1)) AS description,
       tx.tagline AS tagline,tx.trailer_id AS "trailerId",
       COALESCE(tx.poster_url,t.poster_url) AS "posterUrl",t.backdrop_url AS "backdropUrl",
       (SELECT string_agg(DISTINCT g.name, ', ' ORDER BY g.name) FROM sc_title_genres tg JOIN sc_genres g ON g.id=tg.genre_id WHERE tg.title_id=t.id) AS genre,
@@ -411,7 +418,8 @@ export async function getNormalizedDetail(kind: 'movie' | 'series', providerId: 
     FROM sc_provider_streams ps JOIN sc_titles t ON t.id=ps.title_id
     LEFT JOIN sc_languages l ON l.id=ps.language_id
     LEFT JOIN LATERAL (SELECT tx.* FROM sc_title_translations tx JOIN sc_languages tl ON tl.id=tx.language_id
-      WHERE tx.title_id=t.id ORDER BY (tl.code=$3) DESC,(tl.code='en') DESC,(tx.source='tmdb') DESC,tx.language_id LIMIT 1) tx ON true
+      WHERE tx.title_id=t.id ORDER BY (NULLIF(tx.description,'') IS NOT NULL) DESC,(tl.code='en') DESC,(tl.code='nl') DESC,(tl.code='pl') DESC,(tl.code=$3) DESC,
+        (tx.source='tmdb') DESC,tx.language_id LIMIT 1) tx ON true
     WHERE ps.kind=$1 AND ps.provider_id=$2 AND ps.active AND t.kind=$1 LIMIT 1`, [kind, providerId, languageCode]);
   return rows[0] ?? null;
 }
@@ -462,7 +470,8 @@ export async function listNormalizedEpisodes(seriesProviderId: string, seasonNum
       ORDER BY (pl.code=$4) DESC,(pl.code='en') DESC,(pl.code='und') DESC,p.provider_id LIMIT 1) ep ON true
     LEFT JOIN sc_languages l ON l.id=ep.language_id
     LEFT JOIN LATERAL (SELECT x.* FROM sc_title_translations x JOIN sc_languages xl ON xl.id=x.language_id
-      WHERE x.title_id=t.id ORDER BY (xl.code=$4) DESC,(xl.code='en') DESC,(x.source='tmdb') DESC,x.language_id LIMIT 1) tx ON true
+      WHERE x.title_id=t.id ORDER BY (NULLIF(x.description,'') IS NOT NULL) DESC,(xl.code='en') DESC,(xl.code='nl') DESC,(xl.code='pl') DESC,(xl.code=$4) DESC,
+        (x.source='tmdb') DESC,x.language_id LIMIT 1) tx ON true
     WHERE parent.kind='series' AND parent.provider_id=$1 AND parent.active AND se.season_number=$2
     ORDER BY se.episode_number,ep.provider_id LIMIT $3 OFFSET $5`,
   [seriesProviderId, seasonNumber, limit, languageCode, (page - 1) * limit]);
@@ -482,12 +491,15 @@ export async function listNormalizedEpisodeStreams(providerId: string, languageC
 
 export async function listNormalizedHomeCatalog(limit = 50_000, languageCode = 'en') {
   const { rows } = await pool.query(`SELECT DISTINCT ON (t.id) t.kind,ps.provider_id AS id,
-      COALESCE(tx.display_title,t.original_title) AS title,tx.description,
+      COALESCE(tx.display_title,t.original_title) AS title,description_tx.description,
       COALESCE(tx.poster_url,t.poster_url) AS "posterUrl",t.backdrop_url AS "backdropUrl",
       (SELECT string_agg(DISTINCT g.name, ', ' ORDER BY g.name) FROM sc_title_genres tg JOIN sc_genres g ON g.id=tg.genre_id WHERE tg.title_id=t.id) AS genre,
       t.release_year AS "releaseYear",t.rating,t.tmdb_id AS "tmdbId"
     FROM sc_titles t JOIN sc_provider_streams ps ON ps.title_id=t.id AND ps.kind=t.kind AND ps.active
     LEFT JOIN sc_title_translations tx ON tx.title_id=t.id AND tx.language_id=(SELECT id FROM sc_languages WHERE code=$2)
+    LEFT JOIN LATERAL (SELECT x.description FROM sc_title_translations x JOIN sc_languages xl ON xl.id=x.language_id
+      WHERE x.title_id=t.id AND NULLIF(x.description,'') IS NOT NULL
+      ORDER BY CASE xl.code WHEN 'en' THEN 0 WHEN 'nl' THEN 1 WHEN 'pl' THEN 2 ELSE 3 END,x.language_id LIMIT 1) description_tx ON true
     WHERE t.kind IN ('movie','series') ORDER BY t.id,ps.provider_id LIMIT $1`, [limit, languageCode]);
   return rows;
 }

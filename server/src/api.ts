@@ -287,7 +287,10 @@ export function makeApi(options: { apiToken: string; credentialKey: Buffer }) {
         SELECT p.kind,p.provider_id AS id,p.provider_id AS streamid,p.title_id AS canonical_id,p.first_seen_at,t.tmdb_id,
           ${normalizedTitleSql(`COALESCE((SELECT x.display_title FROM sc_title_translations x JOIN sc_languages xl ON xl.id=x.language_id
             WHERE x.title_id=t.id AND x.source='tmdb' ORDER BY (xl.code=$2) DESC,(xl.code='en') DESC,x.language_id LIMIT 1),t.original_title)`)} AS title,
-          tx.description,COALESCE(tx.poster_url,t.poster_url) AS "posterUrl",t.backdrop_url AS "backdropUrl",t.release_year AS "releaseYear",t.rating,
+          COALESCE(NULLIF(tx.description,''),(SELECT x.description FROM sc_title_translations x JOIN sc_languages xl ON xl.id=x.language_id
+            WHERE x.title_id=t.id AND NULLIF(x.description,'') IS NOT NULL
+            ORDER BY CASE xl.code WHEN 'en' THEN 0 WHEN 'nl' THEN 1 WHEN 'pl' THEN 2 ELSE 3 END,x.language_id LIMIT 1)) AS description,
+          COALESCE(tx.poster_url,t.poster_url) AS "posterUrl",t.backdrop_url AS "backdropUrl",t.release_year AS "releaseYear",t.rating,
           l.name AS language,l.code AS "languageCode",se.season_number AS "seasonNumber",se.episode_number AS "episodeNumber",
           COALESCE(ptx.display_title,pt.original_title) AS "seriesTitle",
           parent_stream.provider_id AS "seriesId",
@@ -410,7 +413,12 @@ export function makeApi(options: { apiToken: string; credentialKey: Buffer }) {
     if (await hasNormalizedCatalog()) {
       const language = z.object({ language: z.string().regex(/^[a-z]{2}$/).default('en') }).parse(request.query).language;
       const series = await getNormalizedSeriesTitle(params.id);
-      if (series) await ensureTmdbSeasonMetadata(series.id, params.season, language);
+      if (series) {
+        const metadataLanguages = language === 'en'
+          ? (await pool.query<{ code: string }>(`SELECT code FROM sc_languages WHERE code=ANY($1::text[])`, [['en', 'nl', 'pl']])).rows.map((row) => row.code)
+          : [language];
+        await Promise.all(metadataLanguages.map((code) => ensureTmdbSeasonMetadata(series.id, params.season, code)));
+      }
       const items = await listNormalizedEpisodes(params.id, params.season, query.page, query.limit, language);
       return { items, page: query.page, hasMore: items.length === query.limit };
     }

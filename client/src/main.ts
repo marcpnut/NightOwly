@@ -91,6 +91,18 @@ const profileButton = el<HTMLButtonElement>('central-profile');
 const pageScrollControls = el<HTMLElement>('central-page-scroll-controls');
 const pageUpButton = el<HTMLButtonElement>('central-page-up');
 const pageDownButton = el<HTMLButtonElement>('central-page-down');
+if (document.body.classList.contains('webos-client')) {
+  // Chromium 53 can leave the old remote focus ring visible after pointer
+  // hover. Transfer DOM focus on the delegated mouse event so only the tile
+  // under the pointer owns the focus styling.
+  content.addEventListener('mouseover', (event) => {
+    const target = (event.target as Element | null)?.closest<HTMLButtonElement>('.central-card');
+    if (!target || !content.contains(target) || document.activeElement === target) return;
+    const previous = document.activeElement as HTMLElement | null;
+    if (previous && content.contains(previous) && previous.matches('.central-card')) previous.blur();
+    target.focus();
+  });
+}
 function renderProfileButton(): void {
   profileButton.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 21a8 8 0 0 0-16 0M12 13a5 5 0 1 0 0-10 5 5 0 0 0 0 10Z"/></svg>';
 }
@@ -191,6 +203,35 @@ function revealPlayerControls(): void {
 }
 
 function clear(node: HTMLElement): void { while (node.firstChild) node.removeChild(node.firstChild); }
+type VerticalScrollControls = { root: HTMLElement; up: HTMLButtonElement; down: HTMLButtonElement; update: () => void };
+const verticalScrollControls = new WeakMap<HTMLElement, VerticalScrollControls>();
+function ensureVerticalScrollControls(wrapper: HTMLElement, pane: HTMLElement): void {
+  let controls = verticalScrollControls.get(pane);
+  if (!controls) {
+    const root = node('div', 'central-series-scroll-controls');
+    const makeButton = (direction: 'up' | 'down'): HTMLButtonElement => {
+      const button = node('button', `central-series-scroll-${direction}`) as HTMLButtonElement;
+      button.type = 'button'; button.setAttribute('aria-label', `Scroll ${direction}`);
+      button.innerHTML = direction === 'up'
+        ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 15 7-7 7 7"/></svg>'
+        : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 9 7 7 7-7"/></svg>';
+      button.onclick = () => pane.scrollBy({ top: (direction === 'up' ? -1 : 1) * Math.max(180, pane.clientHeight * .7), behavior: 'smooth' });
+      return button;
+    };
+    const up = makeButton('up'), down = makeButton('down');
+    root.append(up, down);
+    controls = { root, up, down, update: () => {
+      const maxScroll = Math.max(0, pane.scrollHeight - pane.clientHeight);
+      root.classList.toggle('hidden', maxScroll <= 2);
+      up.classList.toggle('hidden', maxScroll <= 2 || pane.scrollTop <= 2);
+      down.classList.toggle('hidden', maxScroll <= 2 || pane.scrollTop >= maxScroll - 2);
+    }};
+    verticalScrollControls.set(pane, controls);
+    pane.addEventListener('scroll', controls.update, { passive: true });
+  }
+  if (controls.root.parentNode !== wrapper) wrapper.appendChild(controls.root);
+  controls.update();
+}
 function node<K extends keyof HTMLElementTagNameMap>(tag: K, className?: string, text?: string): HTMLElementTagNameMap[K] {
   const element = document.createElement(tag);
   if (className) element.className = className;
@@ -1494,10 +1535,16 @@ async function showEpisodes(seriesId: string, parent: HTMLElement, highlightEpis
     const data = await api<{ seasons: Array<{ number: number; count: number }> }>(`/series/${seriesId}/seasons`);
     if (view !== 'detail' || currentItem?.id !== seriesId) return;
     const browser = node('section', 'central-series-browser');
+    const seasonPane = node('div', 'central-series-pane central-season-pane');
     const picker = node('nav', 'central-season-picker');
     picker.setAttribute('aria-label', 'Seasons');
+    seasonPane.appendChild(picker);
+    const episodePane = node('div', 'central-series-pane central-episode-pane');
     const episodes = node('section', 'central-episode-container');
     episodes.setAttribute('aria-label', 'Episodes');
+    episodePane.appendChild(episodes);
+    ensureVerticalScrollControls(seasonPane, picker);
+    ensureVerticalScrollControls(episodePane, episodes);
     let selectedSeason = data.seasons.find((season) => season.number === highlightSeasonNumber)?.number ?? data.seasons[0]?.number;
     for (const season of data.seasons) {
       const button = node('button', 'central-more', `Season ${season.number} (${season.count})`) as HTMLButtonElement;
@@ -1510,10 +1557,11 @@ async function showEpisodes(seriesId: string, parent: HTMLElement, highlightEpis
       };
       picker.appendChild(button);
     }
-    browser.append(picker, episodes); parent.appendChild(browser);
+    browser.append(seasonPane, episodePane); parent.appendChild(browser);
     if (data.seasons.length && selectedSeason !== undefined) {
       const selectedSeasonButton = Array.from(picker.querySelectorAll<HTMLButtonElement>('button')).find((button) => button.getAttribute('aria-pressed') === 'true');
       if (selectedSeasonButton) selectedSeasonButton.scrollIntoView({ block: 'nearest' });
+      verticalScrollControls.get(picker)?.update();
       await loadEpisodePage(seriesId, selectedSeason, 1, episodes, highlightEpisodeCanonicalId);
     }
     if (!data.seasons.length) episodes.appendChild(node('p', 'central-episodes-empty', 'Episodes are still syncing. Please check again shortly.'));
@@ -1546,6 +1594,7 @@ async function loadEpisodePage(seriesId: string, season: number, episodePage: nu
       }, { root: target, rootMargin: '500px 0px' });
       observer.observe(sentinel);
     }
+    verticalScrollControls.get(target)?.update();
   } catch (error) { setStatus(errorMessage(error)); }
 }
 function backFromDetail(): void { navigate(previousView); }
