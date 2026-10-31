@@ -1,11 +1,11 @@
 # NightOwl for LG webOS TV
 
-Version 0.3.5 is packaged for LG webOS TVs including the C9. Choosing a category from the left jump panel now scrolls its shelf to the top, keeps the selected card focused, and preserves that row while it loads. Settings let you hide or show Movie and Show categories, and the jump panel lists only categories enabled in Settings. Shelf focus and scrolling stay synchronized. Arrows move focus to a language or category dropdown without changing its value; press OK/Enter to open it. Movie detail headings reuse the selected card's normalized title, and descriptions prefer English, then Dutch, then Polish when available.
+Version 0.3.6 is packaged for LG webOS TVs including the C9. Category jumps now go directly to the selected shelf; only that shelf and up to two above and three below are fetched around the viewport. Unloaded shelves keep lightweight placeholders, so distant categories do not need to load first. Choosing a category scrolls its shelf to the top and keeps its card focused. Settings let you hide or show Movie and Show categories, and the jump panel lists only categories enabled in Settings.
 
-Download [`NightOwl-webos-c9-0.3.5.ipk`](NightOwl-webos-c9-0.3.5.ipk) and install it using the webOS TV CLI after pairing the TV in Developer Mode:
+Download [`NightOwl-webos-c9-0.3.6.ipk`](NightOwl-webos-c9-0.3.6.ipk) and install it using the webOS TV CLI after pairing the TV in Developer Mode:
 
 ```powershell
-ares-install --device <your-device-name> .\NightOwl-webos-c9-0.3.5.ipk
+ares-install --device <your-device-name> .\NightOwl-webos-c9-0.3.6.ipk
 ```
 
 The app connects to `https://[redacted]`. Sign in with the NightOwl account created by the administrator. Xtream credentials remain in the server Settings page.

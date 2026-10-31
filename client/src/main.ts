@@ -917,16 +917,9 @@ async function showMediaShelves(section: 'movies' | 'series'): Promise<void> {
     const categories = categoryResponse.items.filter((group) => group.id && group.name && (group.itemCount ?? 1) > 0 && !hidden.has(group.id))
       .sort((a, b) => (typeOrder[a.type ?? 'other'] ?? 5) - (typeOrder[b.type ?? 'other'] ?? 5)
         || (b.itemCount ?? 0) - (a.itemCount ?? 0) || a.name.localeCompare(b.name));
-    const initialCategories = categories.slice(0, Math.max(0, 10 - curatedRows.length));
-    let loadedCategoryCount = initialCategories.length;
-    const categoryPages = await Promise.all(initialCategories.map(async (group) => ({
-      group,
-      page: await api<CatalogPage>(`/${section}?page=1&limit=20&language=${encodeURIComponent(appLanguage)}&category=${encodeURIComponent(group.id)}`).catch(() => ({ items: [], hasMore: false }))
-    })));
-    if (generation !== requestGeneration) return;
     const feature = home.featured?.kind === kind ? home.featured
       : curatedRows.map((group) => group.items[0]).find((item): item is Item => Boolean(item))
-        ?? categoryPages.map((entry) => entry.page.items[0]).find((item): item is Item => Boolean(item));
+        ?? null;
     clear(content);
     if (feature) content.appendChild(featuredHero(feature, home.discoverySource));
     curatedRows.forEach((group) => content.appendChild(row(group.title, group.items)));
@@ -944,18 +937,36 @@ async function showMediaShelves(section: 'movies' | 'series'): Promise<void> {
       else if (before?.parentElement === categoryShelfContainer) categoryShelfContainer.insertBefore(playlist, before);
       else categoryShelfContainer.appendChild(playlist);
     };
-    const unmountCategoryRow = (record: CategoryRowRecord): void => {
-      if (!record.row || record.row.contains(document.activeElement)) return;
-      const rect = record.row.getBoundingClientRect();
-      const marginBottom = Number.parseFloat(getComputedStyle(record.row).marginBottom) || 0;
-      const spacer = node('div', 'central-row central-category-spacer'); spacer.style.height = `${Math.max(1, rect.height + marginBottom)}px`;
-      spacer.dataset.categoryIndex = `${categoryRows.indexOf(record)}`;
+    const categoryRowHeight = (): number => {
+      const probe = node('section', 'central-row');
+      probe.style.position = 'absolute'; probe.style.left = '-10000px'; probe.style.top = '0';
+      probe.style.width = `${Math.max(320, content.clientWidth)}px`; probe.style.visibility = 'hidden';
+      probe.appendChild(node('h2', undefined, 'Category'));
+      const shelf = node('div', 'central-shelf');
+      const list = node('div', 'central-cards'); list.appendChild(node('button', 'central-card'));
+      shelf.appendChild(list); probe.appendChild(shelf); content.appendChild(probe);
+      const height = probe.getBoundingClientRect().height + (Number.parseFloat(getComputedStyle(probe).marginBottom) || 0);
+      probe.remove();
+      return Math.max(180, height || window.innerWidth * .16);
+    };
+    const estimatedRowHeight = categoryRowHeight();
+    const makeCategorySpacer = (record: CategoryRowRecord, height = estimatedRowHeight): HTMLElement => {
+      const spacer = node('div', 'central-row central-category-spacer');
+      spacer.style.height = `${Math.max(1, height)}px`; spacer.dataset.categoryIndex = `${categoryRows.indexOf(record)}`;
+      spacer.setAttribute('aria-label', `${record.group.name} category shelf`);
       spacer.addEventListener('central-load-category-row', () => {
-        void loadCategoryRow(record).then(() => {
+        void loadCategoryRow(record, true).then(() => {
           const firstCard = record.row?.querySelector<HTMLButtonElement>('[data-card-key]');
           if (firstCard && record.row) focusShelfCard(firstCard, record.row);
         });
       });
+      return spacer;
+    };
+    const unmountCategoryRow = (record: CategoryRowRecord): void => {
+      if (!record.row || record.row.contains(document.activeElement)) return;
+      const rect = record.row.getBoundingClientRect();
+      const marginBottom = Number.parseFloat(getComputedStyle(record.row).marginBottom) || 0;
+      const spacer = makeCategorySpacer(record, rect.height + marginBottom);
       categoryShelfContainer.replaceChild(spacer, record.row); record.row = null; record.spacer = spacer;
     };
     const categoryReferenceIndex = (): number => {
@@ -988,80 +999,65 @@ async function showMediaShelves(section: 'movies' | 'series'): Promise<void> {
         if (firstPage.items.length) {
           const playlist = makeCategoryPlaylist(record.group, firstPage);
           const next = categoryRows.slice(categoryRows.indexOf(record) + 1).map((entry) => entry.row ?? entry.spacer).find((element): element is HTMLElement => Boolean(element));
-          attachCategoryRow(record, playlist, next ?? categorySentinel);
+          attachCategoryRow(record, playlist, next ?? null);
           trimCategoryCache(categoryReferenceIndex(), protectFromTrim ? record : undefined);
-        } else record.spacer?.remove();
+        } else { record.spacer?.remove(); record.spacer = null; }
       } catch { /* Retry when the spacer returns into the preload window. */ }
       finally { record.loading = false; }
     };
-    const categorySentinel = node('div', 'central-infinite-sentinel'); categorySentinel.dataset.moreCategories = 'true';
-    const appendInitialCategoryPages = (): void => {
-      categoryPages.forEach(({ group, page: firstPage }) => {
-        if (!firstPage.items.length) return;
-        const record: CategoryRowRecord = { group, row: null, spacer: null, loading: false }; categoryRows.push(record);
-        attachCategoryRow(record, makeCategoryPlaylist(group, firstPage), null);
-      });
-      categoryPages.length = 0;
+    categories.forEach((group) => {
+      const record: CategoryRowRecord = { group, row: null, spacer: null, loading: false };
+      categoryRows.push(record);
+      record.spacer = makeCategorySpacer(record);
+      categoryShelfContainer.appendChild(record.spacer);
+    });
+    const scrollCategoryRowToTop = (element: HTMLElement, index: number): void => {
+      const safeTop = (document.getElementById('central-header')?.getBoundingClientRect().bottom ?? 88) + 18;
+      if (index === categoryRows.length - 1) {
+        const requiredBottomSpace = Math.max(0, window.innerHeight - safeTop - element.getBoundingClientRect().height + 24);
+        const currentBottomSpace = Number.parseFloat(categoryShelfContainer.style.paddingBottom) || 0;
+        if (requiredBottomSpace > currentBottomSpace) categoryShelfContainer.style.paddingBottom = `${requiredBottomSpace}px`;
+      }
+      scrollWindowTo(Math.max(0, window.scrollY + element.getBoundingClientRect().top - safeTop));
     };
-    appendInitialCategoryPages();
-    let categoryBatchLoading = false;
-    const appendNextCategoryBatch = async (focusFirst = false): Promise<void> => {
-      if (categoryBatchLoading || loadedCategoryCount >= categories.length || view !== section) return;
-      categoryBatchLoading = true;
-      const nextGroups = categories.slice(loadedCategoryCount, loadedCategoryCount + 10);
-      try {
-        const nextPages = await Promise.all(nextGroups.map(async (group) => ({ group,
-          page: await api<CatalogPage>(`/${section}?page=1&limit=20&language=${encodeURIComponent(appLanguage)}&category=${encodeURIComponent(group.id)}`).catch(() => ({ items: [], hasMore: false }))
-        })));
-        if (!categoryShelfContainer.isConnected || view !== section) return;
-        const firstNewRowIndex = categoryRows.length;
-        nextPages.forEach(({ group, page: firstPage }) => {
-          if (!firstPage.items.length) return;
-          const record: CategoryRowRecord = { group, row: null, spacer: null, loading: false }; categoryRows.push(record);
-          attachCategoryRow(record, makeCategoryPlaylist(group, firstPage), categorySentinel);
-        });
-        loadedCategoryCount += nextGroups.length;
-        trimCategoryCache(Math.max(firstNewRowIndex, categoryRows.length - 1));
-        if (loadedCategoryCount >= categories.length) { categorySentinel.remove(); categoryObserver.disconnect(); }
-        if (focusFirst) {
-          const newRow = categoryRows[firstNewRowIndex]; const firstCard = newRow?.row?.querySelector<HTMLButtonElement>('[data-card-key]');
-          firstCard?.focus(); firstCard?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-        }
-      } finally { categoryBatchLoading = false; }
-    };
-    categorySentinel.addEventListener('central-load-more-categories', () => { void appendNextCategoryBatch(true); });
-    categoryShelfContainer.appendChild(categorySentinel);
-    const categoryObserver = new IntersectionObserver((entries) => {
-      if (entries.some((entry) => entry.isIntersecting)) void appendNextCategoryBatch(false);
-    }, { rootMargin: '520px 0px' });
     const onCategoryPageScroll = (): void => {
       if (view !== section || !categoryShelfContainer.isConnected) return;
-      const preloadLimit = window.innerHeight * 1.5;
-      categoryRows.forEach((record) => {
-        const rect = record.spacer?.getBoundingClientRect();
-        if (rect && rect.top < window.innerHeight + preloadLimit && rect.bottom > -preloadLimit) void loadCategoryRow(record);
+      const firstRect = (categoryRows[0]?.row ?? categoryRows[0]?.spacer)?.getBoundingClientRect();
+      if (!firstRect || firstRect.top > window.innerHeight + estimatedRowHeight) return;
+      const safeTop = (document.getElementById('central-header')?.getBoundingClientRect().bottom ?? 88) + 18;
+      let anchorIndex = categoryRows.findIndex((record) => {
+        const element = record.row ?? record.spacer;
+        return Boolean(element && element.getBoundingClientRect().bottom > safeTop);
       });
-      trimCategoryCache();
+      if (anchorIndex < 0) anchorIndex = categoryRows.length - 1;
+      const firstIndex = Math.max(0, anchorIndex - 2);
+      const lastIndex = Math.min(categoryRows.length - 1, anchorIndex + 3);
+      for (let index = firstIndex; index <= lastIndex; index += 1) {
+        const record = categoryRows[index];
+        if (record?.spacer) void loadCategoryRow(record);
+      }
+      trimCategoryCache(anchorIndex);
     };
     categoryViewScrollHandlers.set(section, onCategoryPageScroll);
     activeCategoryPageScrollHandler = onCategoryPageScroll;
-    if (loadedCategoryCount < categories.length) categoryObserver.observe(categorySentinel);
-    else categorySentinel.remove();
+    onCategoryPageScroll();
     addCategoryJumpMenu(section, categories, async (group) => {
       const targetIndex = categories.findIndex((category) => category.id === group.id);
-      while (targetIndex >= loadedCategoryCount && loadedCategoryCount < categories.length && view === section) {
-        if (categoryBatchLoading) await new Promise((resolve) => window.setTimeout(resolve, 40));
-        else await appendNextCategoryBatch(false);
-      }
       const record = categoryRows.find((entry) => entry.group.id === group.id);
       if (!record) return;
-      if (record.spacer) await loadCategoryRow(record, true);
+      if (record.spacer) {
+        scrollCategoryRowToTop(record.spacer, targetIndex);
+        await loadCategoryRow(record, true);
+      }
       const targetRow = record.row;
       const firstCard = targetRow?.querySelector<HTMLButtonElement>('[data-card-key]');
       if (targetRow && firstCard) focusShelfCard(firstCard, targetRow, true);
       else if (targetRow) {
-        const safeTop = (document.getElementById('central-header')?.getBoundingClientRect().bottom ?? 88) + 18;
-        scrollWindowTo(Math.max(0, window.scrollY + targetRow.getBoundingClientRect().top - safeTop));
+        scrollCategoryRowToTop(targetRow, targetIndex);
+      }
+      for (let index = Math.max(0, targetIndex - 2); index <= Math.min(categoryRows.length - 1, targetIndex + 3); index += 1) {
+        const nearby = categoryRows[index];
+        if (nearby !== record && nearby.spacer) void loadCategoryRow(nearby, true);
       }
     });
     setStatus('');
@@ -1070,24 +1066,10 @@ async function showMediaShelves(section: 'movies' | 'series'): Promise<void> {
   } catch (error) { if (generation === requestGeneration) setStatus(errorMessage(error)); }
 }
 async function preloadMediaShelves(section: 'movies' | 'series'): Promise<void> {
-  const kind = section === 'movies' ? 'movie' : 'series';
-  const [home, categoryResponse] = await Promise.all([
+  await Promise.all([
     api<Home>(`/home?language=${encodeURIComponent(appLanguage)}${profile ? `&profileId=${encodeURIComponent(profile.id)}` : ''}`),
     api<{ items: BrowseCategory[] }>(`/${section}/categories?language=${encodeURIComponent(appLanguage)}`)
   ]);
-  const rowIds = section === 'movies'
-    ? new Set(['top-picks', 'top-250', 'new-releases', 'in-cinemas', 'trending-movies', 'new-movies'])
-    : new Set(['top-picks', 'trending-series', 'popular-series', 'top-series', 'on-air', 'new-series']);
-  const curatedCount = home.rows.filter((group) => rowIds.has(group.id)
-    && group.items.some((item) => item.kind === kind)).length;
-  const typeOrder: Record<string, number> = { genre: 0, platform: 1, collection: 2, quality: 3, other: 4 };
-  const hidden = section === 'movies' ? hiddenMovieCategoryIds : hiddenSeriesCategoryIds;
-  const categories = categoryResponse.items.filter((group) => group.id && group.name && (group.itemCount ?? 1) > 0 && !hidden.has(group.id))
-    .sort((a, b) => (typeOrder[a.type ?? 'other'] ?? 5) - (typeOrder[b.type ?? 'other'] ?? 5)
-      || (b.itemCount ?? 0) - (a.itemCount ?? 0) || a.name.localeCompare(b.name));
-  const initialCategories = categories.slice(0, Math.max(0, 10 - Math.min(5, curatedCount)));
-  await Promise.all(initialCategories.map((group) =>
-    api<CatalogPage>(`/${section}?page=1&limit=20&language=${encodeURIComponent(appLanguage)}&category=${encodeURIComponent(group.id)}`).catch(() => undefined)));
 }
 async function preloadBrowseScreens(): Promise<void> {
   // Home is visible first; warm each tab in turn to avoid a burst of 20 catalog queries.
