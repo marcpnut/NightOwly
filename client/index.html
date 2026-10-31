@@ -1,18 +1,19 @@
 <!doctype html>
-<html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><link rel="icon" type="image/png" href="./icon.png?v=2"/><title>NightOwl</title></head>
+<html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><link rel="icon" type="image/png" href="./icon.png?v=2"/><title>NightOwly</title></head>
 <body class="central-body">
   <div id="central-setup" class="central-setup hidden">
-    <img class="central-setup-logo" src="./nightowl-logo.png?v=2" alt="NightOwl" width="320" height="82" />
-    <h1>Sign in</h1><p>Sign in to your NightOwl account.</p>
-    <form id="central-form"><label>Username<input id="central-username" type="text" minlength="3" maxlength="64" autocomplete="username" required></label>
-      <label>Password<input id="central-password" type="password" minlength="8" maxlength="256" autocomplete="current-password" required></label>
+    <img class="central-setup-logo" src="./nightowl-logo.png?v=2" alt="NightOwly" width="320" height="82" />
+    <h1>Sign in</h1><p>Connect directly using your Xtream provider account.</p>
+    <form id="central-form"><label>Xtream server URL<input id="central-provider-url" type="url" placeholder="http://provider.example:8080" autocomplete="url" required></label>
+      <label>Xtream username<input id="central-username" type="text" maxlength="256" autocomplete="username" required></label>
+      <label>Xtream password<input id="central-password" type="password" maxlength="256" autocomplete="current-password" required></label>
       <button class="primary" type="submit">Sign in</button><p id="central-setup-error" role="status"></p></form>
   </div>
   <div id="central-app" class="central-app hidden">
-    <header id="central-header" class="central-header"><button id="central-profile" class="central-profile" aria-label="Switch user profile" title="Switch user profile"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 21a8 8 0 0 0-16 0M12 13a5 5 0 1 0 0-10 5 5 0 0 0 0 10Z"/></svg></button><img class="central-brand" src="./nightowl-logo.png?v=2" alt="NightOwl" width="220" height="56" />
+    <header id="central-header" class="central-header"><button id="central-profile" class="central-profile" aria-label="Switch user profile" title="Switch user profile"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 21a8 8 0 0 0-16 0M12 13a5 5 0 1 0 0-10 5 5 0 0 0 0 10Z"/></svg></button><img class="central-brand" src="./nightowl-logo.png?v=2" alt="NightOwly" width="220" height="56" />
       <nav id="central-nav" aria-label="Main navigation">
         <button data-view="search" aria-label="Search" class="nav-search"><span class="search-icon" aria-hidden="true"></span> Search</button>
-        <button data-view="home">Home</button><button data-view="whats-new">What's New</button><button data-view="series">Shows</button><button data-view="movies">Movies</button>
+        <button data-view="home">Home</button><button data-view="series">Shows</button><button data-view="movies">Movies</button>
         <button data-view="live">Live TV</button><button data-view="my-list">My Cinema</button>
       </nav><button id="central-settings-shortcut" class="central-header-settings" data-view="settings" aria-label="Settings" title="Settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.14 12.94c.04-.31.06-.62.06-.94s-.02-.63-.07-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.3 7.3 0 0 0-1.63-.95l-.36-2.54a.5.5 0 0 0-.5-.42h-3.76a.5.5 0 0 0-.5.42L9.26 5.3c-.59.23-1.14.55-1.63.95l-2.39-.96a.5.5 0 0 0-.6.22L2.72 8.83a.5.5 0 0 0 .12.64l2.03 1.58c-.05.31-.07.62-.07.94s.02.63.07.94l-2.03 1.58a.5.5 0 0 0-.12.64l1.92 3.32a.5.5 0 0 0 .6.22l2.39-.96c.49.4 1.04.72 1.63.95l.36 2.54a.5.5 0 0 0 .5.42h3.76a.5.5 0 0 0 .5-.42l.36-2.54c.59-.23 1.14-.55 1.63-.95l2.39.96a.5.5 0 0 0 .6-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58Z"/><circle cx="12" cy="12" r="3"/></svg></button>
     </header>

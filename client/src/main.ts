@@ -1,4 +1,5 @@
 import './style.css';
+import { clearXtreamCache, loginXtream, setXtreamCredentials, xtreamApi, type XtreamCredentials } from './xtream';
 
 // LG webOS 4.5 ships Chromium 53. Keep the webOS bundle clear of newer DOM
 // helpers that are absent there. New browsers and the browser build are left
@@ -74,7 +75,7 @@ type Home = { featured: Item | null; discoverySource?: 'tmdb' | 'catalog'; attri
 type CatalogPage = { items: Item[]; hasMore: boolean };
 type BrowseCategory = { id: string; name: string; type?: string; itemCount?: number };
 type AppLanguage = { code: string; name: string };
-type Config = { url: string; token: string };
+type Config = { url: string; token: string; xtream?: XtreamCredentials };
 type View = 'home' | 'whats-new' | 'movies' | 'series' | 'live' | 'my-list' | 'search' | 'settings' | 'detail' | 'profiles' | 'database';
 
 const el = <T extends HTMLElement = HTMLElement>(id: string): T => document.getElementById(id) as T;
@@ -108,7 +109,7 @@ function renderProfileButton(): void {
 }
 let config: Config | null = null;
 function deviceIdentifier(): string {
-  const stored = localStorage.getItem('streamcinema.device');
+  const stored = localStorage.getItem('nightowly.device');
   if (stored && /^[0-9a-f-]{36}$/i.test(stored)) return stored;
   const bytes = new Uint8Array(16);
   if (window.crypto?.getRandomValues) window.crypto.getRandomValues(bytes);
@@ -116,7 +117,7 @@ function deviceIdentifier(): string {
   bytes[6] = (bytes[6] & 15) | 64; bytes[8] = (bytes[8] & 63) | 128;
   const hex = Array.from(bytes).map((value) => (`0${value.toString(16)}`).slice(-2)).join('');
   const id = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-  localStorage.setItem('streamcinema.device', id);
+  localStorage.setItem('nightowly.device', id);
   return id;
 }
 const deviceId = deviceIdentifier();
@@ -125,10 +126,10 @@ let profiles: Profile[] = [];
 const appLanguage = 'en';
 let availableLanguages: AppLanguage[] = [];
 let subtitleSearchLanguages: string[] = (() => {
-  try { const value = JSON.parse(localStorage.getItem('streamcinema.subtitle-languages') || '[]'); return Array.isArray(value) ? value.filter((code): code is string => typeof code === 'string') : []; }
+  try { const value = JSON.parse(localStorage.getItem('nightowly.subtitle-languages') || '[]'); return Array.isArray(value) ? value.filter((code): code is string => typeof code === 'string') : []; }
   catch { return []; }
 })();
-let preferHearingImpairedSubtitles = localStorage.getItem('streamcinema.subtitle-hearing-impaired') === 'true';
+let preferHearingImpairedSubtitles = localStorage.getItem('nightowly.subtitle-hearing-impaired') === 'true';
 let view: View = 'home';
 let previousView: View = 'home';
 let lastFocus: HTMLElement | null = null;
@@ -156,15 +157,15 @@ content.addEventListener('focusin', (event) => {
 });
 let selectedLiveCountry = '';
 let hiddenLiveCategoryIds = (() => {
-  try { const saved = JSON.parse(localStorage.getItem('streamcinema.hidden-live-categories') || '[]') as unknown; return new Set(Array.isArray(saved) ? saved.filter((id): id is string => typeof id === 'string') : []); }
+  try { const saved = JSON.parse(localStorage.getItem('nightowly.hidden-live-categories') || '[]') as unknown; return new Set(Array.isArray(saved) ? saved.filter((id): id is string => typeof id === 'string') : []); }
   catch { return new Set<string>(); }
 })();
 function readHiddenCategories(key: string): Set<string> {
   try { const saved = JSON.parse(localStorage.getItem(key) || '[]') as unknown; return new Set(Array.isArray(saved) ? saved.filter((id): id is string => typeof id === 'string') : []); }
   catch { return new Set<string>(); }
 }
-let hiddenMovieCategoryIds = readHiddenCategories('streamcinema.hidden-movie-categories');
-let hiddenSeriesCategoryIds = readHiddenCategories('streamcinema.hidden-series-categories');
+let hiddenMovieCategoryIds = readHiddenCategories('nightowly.hidden-movie-categories');
+let hiddenSeriesCategoryIds = readHiddenCategories('nightowly.hidden-series-categories');
 let selectedLiveSearch = '';
 let liveSearchTimer = 0;
 let liveSearchGeneration = 0;
@@ -494,6 +495,7 @@ function invalidateCatalogCache(): void {
   catalogApiCache.clear();
   catalogApiInflight.clear();
   cachedViews.clear();
+  clearXtreamCache();
 }
 function invalidateHomeCache(): void {
   catalogApiRevision += 1;
@@ -512,7 +514,8 @@ function resetInlineLiveVideo(): void {
   livePreviewLoader = null;
 }
 async function api<T>(path: string, body?: unknown): Promise<T> {
-  if (!config) throw new Error('Connect to the catalog server first.');
+  if (!config) throw new Error('Sign in to your Xtream provider first.');
+  if (config.xtream) return await xtreamApi(path, body) as T;
   const cacheable = body === undefined && (/^\/home(?:\?|$)/.test(path) || /^\/(?:movies|series)(?:\/categories)?(?:\?|$)/.test(path));
   const cacheKey = `${config.url}|${config.token}|${path}`;
   if (cacheable) {
@@ -533,7 +536,7 @@ async function api<T>(path: string, body?: unknown): Promise<T> {
     const response = await fetch(url, { method: body === undefined ? 'GET' : 'POST',
       headers: { Authorization: `Bearer ${config.token}`, 'X-Device-Id': deviceId, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
       body: body === undefined ? undefined : JSON.stringify(body), signal: controller?.signal, cache: 'no-store' });
-    if (response.status === 401) throw new Error('Your NightOwl sign-in session expired. Sign in again.');
+    if (response.status === 401) throw new Error('Your NightOwly sign-in session expired. Sign in again.');
     if (!response.ok) {
       let message = `Server returned HTTP ${response.status}.`;
       try {
@@ -559,25 +562,10 @@ async function api<T>(path: string, body?: unknown): Promise<T> {
   }
   return request;
 }
-async function loginWithAccount(username: string, password: string): Promise<Config> {
-  const url = import.meta.env.VITE_NIGHTOWL_SERVER_URL || location.origin;
-  const response = await fetch(`${url}/api/v1/auth/login`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Device-Id': deviceId },
-    body: JSON.stringify({ username, password }),
-    cache: 'no-store'
-  });
-  if (!response.ok) {
-    const payload = await response.json().catch(() => null) as { error?: { code?: string } } | null;
-    const code = payload?.error?.code;
-    if (response.status === 401) throw new Error('Username or password is incorrect.');
-    if (response.status === 429) throw new Error('Too many sign-in attempts. Try again later.');
-    if (response.status === 409) throw new Error('No NightOwl account has been created yet. Ask the administrator to create one with PowerShell.');
-    throw new Error(code ? `Sign-in failed (${code}).` : `Server returned HTTP ${response.status}.`);
-  }
-  const result = await response.json() as { accessToken: string };
-  if (!result.accessToken) throw new Error('The server did not return a sign-in session.');
-  return { url, token: result.accessToken };
+async function loginWithXtream(providerUrl: string, username: string, password: string): Promise<Config> {
+  const credentials: XtreamCredentials = { baseUrl: providerUrl, username, password };
+  await loginXtream(credentials);
+  return { url: providerUrl.trim().replace(/\/+$/, ''), token: '', xtream: credentials };
 }
 function fitWebosLivePreview(): void {
   if (!document.body.classList.contains('webos-client')) return;
@@ -1467,8 +1455,8 @@ type DatabaseSummary = { counts: { movies: number; series: number; liveTv: numbe
 async function showDatabase(): Promise<void> {
   clear(content);
   const page = node('section', 'central-database-page');
-  page.append(node('div', 'central-page-kicker', 'CATALOG'), node('h1', 'central-page-title', 'Database information'));
-  page.appendChild(node('p', 'central-db-note', 'Active stream and episode totals in the NightOwl catalog.'));
+  page.append(node('div', 'central-page-kicker', 'PROVIDER'), node('h1', 'central-page-title', 'Provider catalog'));
+  page.appendChild(node('p', 'central-db-note', 'Active stream and episode totals in the NightOwly catalog.'));
   const counts = node('div', 'central-db-counts'); page.appendChild(counts);
   const refresh = node('button', 'central-more central-db-refresh', 'Refresh catalog') as HTMLButtonElement;
   const statusMessage = node('p', 'central-db-note', 'Loading catalog information…');
@@ -1476,10 +1464,10 @@ async function showDatabase(): Promise<void> {
   let polling = false;
   const refreshStatus = (state: DatabaseSummary['refresh']): void => {
     const progress = state.total ? ` (${state.processed.toLocaleString()} / ${state.total.toLocaleString()})` : '';
-    statusMessage.textContent = state.status === 'running' ? `${state.phase}${progress}. NightOwl compares playlist stream IDs and imports only missing entries.`
+    statusMessage.textContent = state.status === 'running' ? `${state.phase}${progress}. Provider data loads directly as you browse.`
       : state.status === 'success' ? `${state.message || 'Catalog refresh complete.'}${state.finishedAt ? ` · ${new Date(state.finishedAt).toLocaleString()}` : ''}`
         : state.status === 'error' ? `${state.message || 'Refresh failed.'}${state.finishedAt ? ` · ${new Date(state.finishedAt).toLocaleString()}` : ''}`
-      : 'Refresh scans the provider’s full lists and series details, then adds provider IDs that are not already in the database.';
+      : 'Refresh clears cached provider data on this device. Categories and streams reload as you browse.';
     refresh.disabled = state.status === 'running'; refresh.textContent = state.status === 'running' ? 'Refreshing…' : 'Refresh catalog';
   };
   const loadSummary = async (): Promise<void> => {
@@ -1799,7 +1787,7 @@ async function play(item: Item, liveFormat: 'm3u8' | 'ts' = 'm3u8', resumeAt?: n
     player.classList.remove('hidden');
     revealPlayerControls();
     let sourceUrl: string;
-    const requiresRemux = playableItem.kind !== 'live' && ['mkv', 'avi', 'wmv', 'flv', 'mov', 'ts', 'mpeg', 'mpg'].includes((playableItem.streams?.find((stream) => stream.id === (playableItem.streamId ?? playableItem.id))?.extension ?? (playableItem as Item & { streamExtension?: string }).streamExtension ?? '').toLowerCase().replace(/^\./, ''));
+    const requiresRemux = !config?.xtream && playableItem.kind !== 'live' && ['mkv', 'avi', 'wmv', 'flv', 'mov', 'ts', 'mpeg', 'mpg'].includes((playableItem.streams?.find((stream) => stream.id === (playableItem.streamId ?? playableItem.id))?.extension ?? (playableItem as Item & { streamExtension?: string }).streamExtension ?? '').toLowerCase().replace(/^\./, ''));
     activeRemuxMode = requiresRemux ? (forceVideoTranscode ? 'transcode' : 'copy') : null;
     remuxTranscodeAttempted = forceVideoTranscode;
     if (sourceOverride) sourceUrl = sourceOverride;
@@ -1859,7 +1847,7 @@ function showProfiles(): void {
   const choices = node('div', 'central-profile-choices');
   for (const choice of profiles) {
     const button = node('button', 'central-profile-choice', choice.name) as HTMLButtonElement;
-    button.onclick = () => { profile = choice; watched.clear(); favorites.clear(); invalidateCatalogCache(); localStorage.setItem('streamcinema.profile', choice.id); renderProfileButton(); navigate('home'); window.setTimeout(() => { void preloadBrowseScreens(); }, 0); };
+    button.onclick = () => { profile = choice; watched.clear(); favorites.clear(); invalidateCatalogCache(); localStorage.setItem('nightowly.profile', choice.id); renderProfileButton(); navigate('home'); window.setTimeout(() => { void preloadBrowseScreens(); }, 0); };
     choices.appendChild(button);
   }
   panel.appendChild(choices);
@@ -1869,7 +1857,7 @@ function showProfiles(): void {
   create.append(input, add); panel.appendChild(create);
   create.onsubmit = (event) => { event.preventDefault();
     void (async () => {
-      try { const next = await api<Profile>('/profiles', { name: input.value.trim() }); profiles.push(next); profile = next; invalidateCatalogCache(); localStorage.setItem('streamcinema.profile', next.id); renderProfileButton(); navigate('home'); window.setTimeout(() => { void preloadBrowseScreens(); }, 0); }
+      try { const next = await api<Profile>('/profiles', { name: input.value.trim() }); profiles.push(next); profile = next; invalidateCatalogCache(); localStorage.setItem('nightowly.profile', next.id); renderProfileButton(); navigate('home'); window.setTimeout(() => { void preloadBrowseScreens(); }, 0); }
       catch (error) { setStatus(errorMessage(error)); }
     })();
   };
@@ -1877,26 +1865,33 @@ function showProfiles(): void {
 }
 async function showSettings(): Promise<void> {
   const panel = node('section', 'central-settings'); panel.appendChild(node('h1', undefined, 'Settings'));
-  panel.appendChild(node('p', undefined, `Server: ${config?.url ?? ''}`));
+  panel.appendChild(node('p', undefined, `Provider: ${config?.xtream?.baseUrl ?? ''}`));
   let openSubtitlesStatus!: HTMLElement;
   let openSubtitlesForm!: HTMLFormElement;
   panel.appendChild(node('h2', undefined, 'Xtream provider'));
-  panel.appendChild(node('p', undefined, 'Credentials are encrypted in the server database and used by the server for playback. Saving credentials does not contact the provider or import the catalog.'));
+  panel.appendChild(node('p', undefined, 'NightOwly connects directly to your Xtream provider. Your provider URL and credentials are saved on this device.'));
   const form = node('form', 'provider-form') as HTMLFormElement;
   const providerUrl = node('input', 'central-search') as HTMLInputElement; providerUrl.type = 'url'; providerUrl.required = true; providerUrl.placeholder = 'https://provider.example'; providerUrl.setAttribute('aria-label', 'Xtream server URL');
+  providerUrl.value = config?.xtream?.baseUrl ?? '';
   const providerUser = node('input', 'central-search') as HTMLInputElement; providerUser.type = 'text'; providerUser.autocomplete = 'off'; providerUser.required = true; providerUser.setAttribute('aria-label', 'Xtream username');
+  providerUser.value = config?.xtream?.username ?? '';
   const providerPass = node('input', 'central-search') as HTMLInputElement; providerPass.type = 'password'; providerPass.autocomplete = 'new-password'; providerPass.required = true; providerPass.setAttribute('aria-label', 'Xtream password');
   const connectProvider = node('button', 'central-more', 'Save credentials') as HTMLButtonElement; connectProvider.type = 'submit';
-  const providerMessage = node('p', 'provider-message', 'Your credentials will be stored securely. No catalog sync will start from this screen.');
+  const providerMessage = node('p', 'provider-message', 'Update the provider account used by NightOwly on this device.');
   void api<{ configured: boolean }>('/provider/status').then(({ configured }) => {
-    providerMessage.textContent = configured ? 'Xtream credentials are saved. Enter new values below to replace them.' : 'Add your Xtream provider here. Credentials are stored securely; saving them will not start a catalog sync.';
+    providerMessage.textContent = configured ? 'Xtream account connected. Enter new values below to switch providers.' : 'Enter your Xtream account details to connect.';
   }).catch(() => undefined);
-  form.append(node('label', undefined, 'Server URL'), providerUrl, node('label', undefined, 'Username'), providerUser,
+  form.append(node('label', undefined, 'Xtream server URL'), providerUrl, node('label', undefined, 'Username'), providerUser,
     node('label', undefined, 'Password'), providerPass, connectProvider, providerMessage);
   form.onsubmit = (event) => {
-    event.preventDefault(); connectProvider.disabled = true; providerMessage.textContent = 'Saving credentials securely…';
+    event.preventDefault(); connectProvider.disabled = true; providerMessage.textContent = 'Connecting to your provider…';
     void api<{ connected: boolean; catalogSyncStarted: boolean }>(`/provider/connect`, { baseUrl: providerUrl.value.trim(), username: providerUser.value.trim(), password: providerPass.value })
-      .then(() => { providerPass.value = ''; providerMessage.textContent = 'Credentials saved. No provider catalog sync was started.'; })
+      .then(() => {
+        const xtream = { baseUrl: providerUrl.value.trim(), username: providerUser.value.trim(), password: providerPass.value };
+        setXtreamCredentials(xtream);
+        if (config) { config = { url: xtream.baseUrl, token: '', xtream }; localStorage.setItem('nightowly.config', JSON.stringify(config)); }
+        invalidateCatalogCache(); providerPass.value = ''; providerMessage.textContent = 'Connected. Provider titles will load as you browse.';
+      })
       .catch((error) => { providerMessage.textContent = errorMessage(error); })
       .then(() => { connectProvider.disabled = false; }, () => { connectProvider.disabled = false; });
   };
@@ -1908,12 +1903,12 @@ async function showSettings(): Promise<void> {
     const tmdbForm = node('form', 'provider-form') as HTMLFormElement;
     const tmdbToken = node('input', 'central-search') as HTMLInputElement; tmdbToken.type = 'password'; tmdbToken.autocomplete = 'off'; tmdbToken.placeholder = 'TMDB API key or Read Access Token'; tmdbToken.setAttribute('aria-label', 'TMDB API key or Read Access Token');
     const saveTmdb = node('button', 'central-more', 'Save TMDB token') as HTMLButtonElement; saveTmdb.type = 'submit';
-    const tmdbMessage = node('p', 'provider-message', 'The token is sent to the server over this connection and stored encrypted in its database. It is never stored in the browser or written to Git.');
+    const tmdbMessage = node('p', 'provider-message', 'Optional TMDB details are stored on this device. Xtream provider metadata remains the primary source.');
     tmdbForm.append(node('label', undefined, 'TMDB API key or Read Access Token'), tmdbToken, saveTmdb, tmdbMessage);
     tmdbForm.onsubmit = (event) => {
       event.preventDefault(); saveTmdb.disabled = true;
       void api<{ configured: boolean }>('/tmdb/config', { token: tmdbToken.value }).then((result) => {
-        tmdbToken.value = ''; tmdbMessage.textContent = result.configured ? 'TMDB token saved securely. Reloading home…' : 'TMDB token cleared.';
+        tmdbToken.value = ''; tmdbMessage.textContent = result.configured ? 'TMDB token saved on this device.' : 'TMDB token cleared.';
         invalidateCatalogCache();
         navigate('home');
         window.setTimeout(() => { void preloadBrowseScreens(); }, 0);
@@ -1940,7 +1935,7 @@ async function showSettings(): Promise<void> {
       else if (selectedSubtitleLanguages.size > 1) selectedSubtitleLanguages.delete(code);
       else { checkbox.checked = true; return; }
       subtitleSearchLanguages = availableLanguages.filter((language) => selectedSubtitleLanguages.has(language.code)).map((language) => language.code);
-      localStorage.setItem('streamcinema.subtitle-languages', JSON.stringify(subtitleSearchLanguages));
+      localStorage.setItem('nightowly.subtitle-languages', JSON.stringify(subtitleSearchLanguages));
       renderSubtitlePreferenceMessage();
     };
     option.append(checkbox, document.createTextNode(name)); subtitleLanguageOptions.appendChild(option);
@@ -1948,7 +1943,7 @@ async function showSettings(): Promise<void> {
   renderSubtitlePreferenceMessage(); subtitleLanguagePicker.appendChild(subtitleLanguageOptions);
   const hearingPreference = node('label', 'provider-hearing-preference') as HTMLLabelElement;
   const hearingCheckbox = node('input') as HTMLInputElement; hearingCheckbox.type = 'checkbox'; hearingCheckbox.checked = preferHearingImpairedSubtitles;
-  hearingCheckbox.onchange = () => { preferHearingImpairedSubtitles = hearingCheckbox.checked; localStorage.setItem('streamcinema.subtitle-hearing-impaired', String(preferHearingImpairedSubtitles)); };
+  hearingCheckbox.onchange = () => { preferHearingImpairedSubtitles = hearingCheckbox.checked; localStorage.setItem('nightowly.subtitle-hearing-impaired', String(preferHearingImpairedSubtitles)); };
   hearingPreference.append(hearingCheckbox, document.createTextNode('Prefer SDH / hearing-impaired subtitles in search results'));
   panel.append(subtitleLanguagePicker, hearingPreference, subtitlePreferenceMessage);
   openSubtitlesStatus = node('p', undefined, 'Checking OpenSubtitles configuration…');
@@ -1956,12 +1951,12 @@ async function showSettings(): Promise<void> {
     const subtitlesForm = node('form', 'provider-form') as HTMLFormElement; openSubtitlesForm = subtitlesForm;
     const apiKey = node('input', 'central-search') as HTMLInputElement; apiKey.type = 'password'; apiKey.autocomplete = 'off'; apiKey.placeholder = 'OpenSubtitles API key'; apiKey.setAttribute('aria-label', 'OpenSubtitles API key');
     const saveKey = node('button', 'central-more', 'Save OpenSubtitles key') as HTMLButtonElement; saveKey.type = 'submit';
-    const message = node('p', 'provider-message', 'The API key is sent to the server and stored encrypted. Subtitle search uses the OpenSubtitles REST API.');
+    const message = node('p', 'provider-message', 'The OpenSubtitles API key is stored on this device and used for direct subtitle searches.');
     subtitlesForm.append(node('label', undefined, 'OpenSubtitles API key'), apiKey, saveKey, message);
     subtitlesForm.onsubmit = (event) => {
-      event.preventDefault(); saveKey.disabled = true; message.textContent = 'Saving key securely…';
+      event.preventDefault(); saveKey.disabled = true; message.textContent = 'Saving key on this device…';
       void api<{ configured: boolean }>('/opensubtitles/config', { apiKey: apiKey.value.trim() })
-        .then((result) => { apiKey.value = ''; message.textContent = result.configured ? 'OpenSubtitles API key saved securely.' : 'OpenSubtitles API key removed.'; openSubtitlesStatus.textContent = result.configured ? 'OpenSubtitles is configured.' : 'OpenSubtitles is not configured.'; })
+        .then((result) => { apiKey.value = ''; message.textContent = result.configured ? 'OpenSubtitles API key saved on this device.' : 'OpenSubtitles API key removed.'; openSubtitlesStatus.textContent = result.configured ? 'OpenSubtitles is configured.' : 'OpenSubtitles is not configured.'; })
         .catch((error) => { message.textContent = errorMessage(error); })
         .then(() => { saveKey.disabled = false; }, () => { saveKey.disabled = false; });
     };
@@ -1972,8 +1967,8 @@ async function showSettings(): Promise<void> {
   const tmdbLogo = node('img'); tmdbLogo.src = 'https://www.themoviedb.org/assets/2/v4/logos/v2/blue_square_2-d537fb228cf3ded904ef09b136fe3fec72548ebc1fea3fbbd1ad9e36364db38b.svg'; tmdbLogo.alt = 'TMDB'; tmdbLink.appendChild(tmdbLogo); credits.appendChild(tmdbLink);
   credits.appendChild(node('p', '', 'This product uses the TMDB API but is not endorsed or certified by TMDB.'));
   panel.appendChild(credits);
-  const reconnect = node('button', undefined, 'Change server') as HTMLButtonElement;
-  reconnect.onclick = () => { localStorage.removeItem('streamcinema.config'); location.href = location.pathname; };
+  const reconnect = node('button', undefined, 'Change provider login') as HTMLButtonElement;
+  reconnect.onclick = () => { localStorage.removeItem('nightowly.config'); location.href = location.pathname; };
   panel.appendChild(reconnect);
   const initialChildren = Array.from(panel.children);
   const settingsTitle = initialChildren[0] as HTMLElement;
@@ -2004,7 +1999,7 @@ async function showSettings(): Promise<void> {
   const tmdbPage = makePage('credentials-tmdb', 'TMDB API key');
   const openSubtitlesPage = makePage('credentials-opensubtitles', 'OpenSubtitles API key');
   makeGroup('Account');
-  const databasePage = makePage('database-information', 'Database information');
+  const databasePage = makePage('database-information', 'Provider catalog');
   const logoutPage = makePage('account-logout', 'Log out');
   function selectSettingsPage(id: string): void {
     activeSettingsPage = id;
@@ -2031,18 +2026,18 @@ async function showSettings(): Promise<void> {
     }
     currentPage?.appendChild(child);
   }
-  logoutPage.append(node('h2', undefined, 'Log out'), node('p', undefined, 'Sign out of NightOwl on this device. You will need your username and password to sign in again.'));
+  logoutPage.append(node('h2', undefined, 'Log out'), node('p', undefined, 'Sign out of NightOwly on this device. You will need your username and password to sign in again.'));
   const logoutButton = node('button', 'central-more', 'Log out') as HTMLButtonElement;
   logoutButton.onclick = () => {
     logoutButton.disabled = true;
     void (async () => {
-      try { await api('/auth/logout', {}); } catch { /* Clear this browser session even if the server cannot be reached. */ }
-      localStorage.removeItem('streamcinema.config');
+      try { await api('/auth/logout', {}); } catch { /* Clear this device session even if the provider cannot be reached. */ }
+      localStorage.removeItem('nightowly.config');
       location.reload();
     })();
   };
   logoutPage.appendChild(logoutButton);
-  databasePage.append(node('h2', undefined, 'Database information'), node('p', 'central-db-note', 'Active stream and episode totals in the NightOwl catalog.'));
+  databasePage.append(node('h2', undefined, 'Provider catalog'), node('p', 'central-db-note', 'Counts show titles fetched on this device while browsing. NightOwly does not copy provider data to a NightOwl server.'));
   const databaseCounts = node('div', 'central-db-counts');
   const databaseRefresh = node('button', 'central-more central-db-refresh', 'Refresh catalog') as HTMLButtonElement;
   const databaseRefreshStatus = node('p', 'central-db-note', 'Loading catalog information…');
@@ -2058,9 +2053,9 @@ async function showSettings(): Promise<void> {
     }
     const refreshState = data.refresh;
     const progress = refreshState.total ? ` (${refreshState.processed.toLocaleString()} / ${refreshState.total.toLocaleString()})` : '';
-    databaseRefreshStatus.textContent = refreshState.status === 'running' ? `${refreshState.phase}${progress}. NightOwl compares playlist stream IDs and imports only missing entries.`
+    databaseRefreshStatus.textContent = refreshState.status === 'running' ? `${refreshState.phase}${progress}. Provider data loads directly as you browse.`
       : refreshState.status === 'success' || refreshState.status === 'error' ? `${refreshState.message || (refreshState.status === 'success' ? 'Refresh complete.' : 'Refresh failed.')}${refreshState.finishedAt ? ` · ${new Date(refreshState.finishedAt).toLocaleString()}` : ''}`
-        : `Refresh scans the provider’s full lists and series details, then adds provider IDs not already in the database.${data.lastRefreshed ? ` Most recently imported stream: ${new Date(data.lastRefreshed).toLocaleString()}.` : ''}`;
+        : 'Refresh clears cached provider data on this device. Categories and streams reload as you browse.';
     databaseRefresh.disabled = refreshState.status === 'running'; databaseRefresh.textContent = refreshState.status === 'running' ? 'Refreshing…' : 'Refresh catalog';
     if (refreshState.status === 'running') window.setTimeout(() => { void updateDatabaseSummary().catch((error) => { databaseRefreshStatus.textContent = errorMessage(error); }); }, 2000);
   };
@@ -2119,9 +2114,9 @@ async function showSettings(): Promise<void> {
     }).catch((error) => { statusText.textContent = errorMessage(error); });
     return ui;
   };
-  buildCategorySettings(liveCategoriesPage, 'live', hiddenLiveCategoryIds, 'streamcinema.hidden-live-categories');
-  buildCategorySettings(movieCategoriesPage, 'movies', hiddenMovieCategoryIds, 'streamcinema.hidden-movie-categories');
-  buildCategorySettings(seriesCategoriesPage, 'series', hiddenSeriesCategoryIds, 'streamcinema.hidden-series-categories');
+  buildCategorySettings(liveCategoriesPage, 'live', hiddenLiveCategoryIds, 'nightowly.hidden-live-categories');
+  buildCategorySettings(movieCategoriesPage, 'movies', hiddenMovieCategoryIds, 'nightowly.hidden-movie-categories');
+  buildCategorySettings(seriesCategoriesPage, 'series', hiddenSeriesCategoryIds, 'nightowly.hidden-series-categories');
   selectSettingsPage(activeSettingsPage);
   layout.append(sidebar, pageHost); panel.appendChild(layout); content.appendChild(panel);
   layout.addEventListener('keydown', (event) => {
@@ -2221,32 +2216,34 @@ async function showSettings(): Promise<void> {
     const data = await api<{ source?: string; datasets: Array<{ dataset: string; status: string; rowCount?: number; lastSuccessAt?: string }> }>('/sync/status');
     sync.textContent = data.source === 'normalized_database'
       ? `Catalog is loaded from PostgreSQL: ${data.datasets.map((entry) => `${entry.dataset} ${entry.rowCount ?? 0}`).join(' · ')}. View counts and refresh it from Database.`
-      : data.datasets.map((entry) => `${entry.dataset}: ${entry.status}${entry.lastSuccessAt ? ` · ${new Date(entry.lastSuccessAt).toLocaleString()}` : ''}`).join('  |  ') || 'No server sync status is available.';
+      : data.datasets.map((entry) => `${entry.dataset}: ${entry.status}${entry.lastSuccessAt ? ` · ${new Date(entry.lastSuccessAt).toLocaleString()}` : ''}`).join('  |  ') || 'No provider sync status is available.';
   } catch (error) { sync.textContent = errorMessage(error); }
 }
 async function connect(next: Config): Promise<void> {
   invalidateCatalogCache();
   config = next;
+  if (next.xtream) setXtreamCredentials(next.xtream);
   await api('/health');
   const languageData = await api<{ items: AppLanguage[] }>('/languages');
   availableLanguages = languageData.items.filter((language) => language.code !== 'und' && language.name.toLowerCase() !== 'unlabelled');
-  localStorage.removeItem('streamcinema.language');
+  localStorage.removeItem('nightowly.language');
   subtitleSearchLanguages = subtitleSearchLanguages.filter((code) => availableLanguages.some((language) => language.code === code));
   if (!subtitleSearchLanguages.length) subtitleSearchLanguages = [availableLanguages.some(({ code }) => code === 'en') ? 'en' : availableLanguages[0]?.code || 'en'];
-  localStorage.setItem('streamcinema.subtitle-languages', JSON.stringify(subtitleSearchLanguages));
+  localStorage.setItem('nightowly.subtitle-languages', JSON.stringify(subtitleSearchLanguages));
   const result = await api<{ items: Profile[] }>('/profiles');
   profiles = result.items;
   if (!profiles.length) { const first = await api<Profile>('/profiles', { name: 'Default' }); profiles = [first]; }
-  profile = profiles.find((entry) => entry.id === localStorage.getItem('streamcinema.profile')) ?? profiles[0];
-  localStorage.setItem('streamcinema.profile', profile.id);
+  profile = profiles.find((entry) => entry.id === localStorage.getItem('nightowly.profile')) ?? profiles[0];
+  localStorage.setItem('nightowly.profile', profile.id);
   renderProfileButton();
-  localStorage.setItem('streamcinema.config', JSON.stringify(next));
+  localStorage.setItem('nightowly.config', JSON.stringify(next));
   setup.classList.add('hidden'); app.classList.remove('hidden'); navigate('home');
   window.setTimeout(() => { void preloadBrowseScreens(); }, 0);
 }
 
 el<HTMLFormElement>('central-form').onsubmit = (event) => {
   event.preventDefault();
+  const providerUrl = el<HTMLInputElement>('central-provider-url').value.trim();
   const username = el<HTMLInputElement>('central-username').value.trim();
   const password = el<HTMLInputElement>('central-password').value;
   const button = document.querySelector<HTMLButtonElement>('#central-form button[type="submit"]');
@@ -2254,8 +2251,9 @@ el<HTMLFormElement>('central-form').onsubmit = (event) => {
   el('central-setup-error').textContent = 'Signing in…';
   void (async () => {
     try {
-      const session = await loginWithAccount(username, password);
+      const session = await loginWithXtream(providerUrl, username, password);
       await connect(session);
+      el<HTMLInputElement>('central-provider-url').value = providerUrl;
       el<HTMLInputElement>('central-username').value = '';
       el<HTMLInputElement>('central-password').value = '';
     } catch (error) {
@@ -2511,7 +2509,7 @@ function openWebosExitPrompt(): void {
   const backdrop = node('section', 'webos-exit-backdrop');
   backdrop.setAttribute('role', 'alertdialog'); backdrop.setAttribute('aria-modal', 'true');
   const dialog = node('div', 'webos-exit-dialog');
-  const heading = node('h2', undefined, 'Exit NightOwl?');
+  const heading = node('h2', undefined, 'Exit NightOwly?');
   const message = node('p', undefined, 'Your sign-in and viewing data will remain on this TV.');
   const actions = node('div', 'webos-exit-actions');
   const stay = node('button', 'webos-exit-stay', 'Stay') as HTMLButtonElement;
@@ -2783,20 +2781,14 @@ document.addEventListener('keydown', (event) => {
 });
 
 try {
-  const localDemo = (location.hostname === '127.0.0.1' || location.hostname === 'localhost') && /(?:^|[?&])demo=1(?:&|$)/.test(location.search);
-  if (localDemo) {
-    void connect({ url: location.origin, token: 'local-demo-only' }).catch((error) => {
-      setup.classList.remove('hidden'); el('central-setup-error').textContent = errorMessage(error);
-    });
-  } else {
-  if (localStorage.getItem('streamcinema.auth-version') !== 'nightowl-account-v1') {
-    localStorage.removeItem('streamcinema.config');
-    localStorage.setItem('streamcinema.auth-version', 'nightowl-account-v1');
+  if (localStorage.getItem('nightowly.auth-version') !== 'xtream-direct-v1') {
+    localStorage.removeItem('nightowly.config');
+    localStorage.setItem('nightowly.auth-version', 'xtream-direct-v1');
   }
-  const saved = JSON.parse(localStorage.getItem('streamcinema.config') || 'null') as Config | null;
-  if (saved?.url && saved.token) void connect(saved).catch((error) => {
+  const saved = JSON.parse(localStorage.getItem('nightowly.config') || 'null') as Config | null;
+  if (saved?.xtream?.baseUrl && saved.xtream.username && saved.xtream.password) void connect(saved).catch((error) => {
     setup.classList.remove('hidden'); el('central-setup-error').textContent = errorMessage(error);
   });
   else setup.classList.remove('hidden');
-  }
 } catch { setup.classList.remove('hidden'); }
+

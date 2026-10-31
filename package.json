@@ -1,12 +1,11 @@
 {
-  "name": "streamcinema",
-  "version": "0.1.0",
+  "name": "nightowly",
+  "version": "1.0.0",
   "private": true,
   "scripts": {
     "dev": "pnpm --dir client dev",
     "demo": "pnpm build && pnpm --dir server demo",
-    "build": "pnpm --dir server build && pnpm --dir client build",
-    "test": "pnpm --dir server test",
+    "build": "pnpm --dir client build",
     "package:webos": "pnpm --dir client build:webos && pnpm --dir client exec ares-package dist -o ../packages"
   }
 }

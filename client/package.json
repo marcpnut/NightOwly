@@ -1,6 +1,6 @@
 {
-  "name": "streamcinema-webos-client",
-  "version": "0.1.0",
+  "name": "nightowly-webos-client",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "scripts": {

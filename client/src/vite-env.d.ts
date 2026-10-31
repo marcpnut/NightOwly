@@ -1,7 +1,6 @@
 /// <reference types="vite/client" />
 
 interface ImportMetaEnv {
-  readonly VITE_NIGHTOWL_SERVER_URL?: string;
 }
 
 interface ImportMeta {
