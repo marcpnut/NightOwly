@@ -2695,14 +2695,6 @@ document.addEventListener('keydown', (event) => {
     const rows = Array.from(content.querySelectorAll<HTMLElement>('.central-row'));
     const rowIndex = activeRow ? rows.indexOf(activeRow) : -1;
     if (rowIndex >= 0) {
-      if (document.body.classList.contains('webos-client') && key === 40 && rowIndex === rows.length - 1
-        && !content.querySelector('[data-more-categories="true"]')) {
-        event.preventDefault();
-        const scrolling = document.scrollingElement ?? document.documentElement;
-        const pageHeight = Math.max(scrolling.scrollHeight, document.body.scrollHeight, content.scrollHeight);
-        scrollWindowTo(Math.max(0, pageHeight - window.innerHeight));
-        return;
-      }
       // Wrap from the bottom of the category list only after every category
       // has been appended. Before that, Up must always mean the previous row.
       const allCategoriesLoaded = !content.querySelector('[data-more-categories="true"]');
