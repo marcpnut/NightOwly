@@ -281,6 +281,24 @@ html.settings-open,body.settings-open,html.search-open,body.search-open{height:1
 .central-settings-sidebar::-webkit-scrollbar{display:none}
 .central-settings-nav-item{position:relative;z-index:1}
 .central-settings-nav-item:focus,.central-settings-nav-item:focus-visible{z-index:32}
+
+/* Older webOS engines draw CSS outlines as square corners. Use a shadow ring,
+   which follows each control's border radius on both the C9 and newer TVs. */
+.webos-client #central-app button:focus,.webos-client #central-app input:focus:not([type="range"]),.webos-client #central-app select:focus,.webos-client #central-app textarea:focus,.webos-client #central-setup button:focus,.webos-client #central-setup input:focus,.webos-client #central-player button:focus{outline:0!important;box-shadow:0 0 0 2px var(--brand-cyan)!important}
+.webos-client #central-app .central-card:focus{border-color:var(--brand-cyan)!important;box-shadow:0 0 0 2px var(--brand-cyan),0 10px 35px rgba(0,0,0,.9)!important}
+.webos-client #central-app .central-settings-nav-item:focus,.webos-client #central-app .central-settings-nav-item:focus-visible{box-shadow:0 0 0 2px var(--brand-cyan)!important}
+.webos-client #central-app .central-settings-nav-item[aria-current="page"]:focus,.webos-client #central-app .central-settings-nav-item[aria-current="page"]:focus-visible{box-shadow:0 0 0 2px var(--brand-cyan),inset 0 3px 7px rgba(0,0,0,.82)!important}
+.webos-client #central-app select.central-category-select{appearance:none;-webkit-appearance:none;min-height:48px;padding:10px 44px 10px 15px;border:1px solid rgba(176,191,211,.45);border-radius:10px;background-color:#171a21;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='m6 9 6 6 6-6' fill='none' stroke='%2325dfff' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 14px center;background-size:16px;color:#f4f7fb;box-shadow:inset 0 1px rgba(255,255,255,.06),0 3px 10px rgba(0,0,0,.22);font-weight:700}
+.webos-client #central-app select.central-category-select option{background:#171a21;color:#f4f7fb;padding:10px}
+.webos-client #central-app select.central-category-select option:checked{background:#17323b;color:#fff}
+.webos-client .webos-back-hint{position:fixed;z-index:1000;left:50%;bottom:38px;transform:translateX(-50%);padding:14px 22px;border:1px solid rgba(37,223,255,.55);border-radius:12px;background:rgba(12,14,22,.94);color:#fff;font-size:18px;box-shadow:0 8px 30px rgba(0,0,0,.6)}
+.webos-client .webos-exit-backdrop{position:fixed;z-index:1001;inset:0;display:flex;align-items:center;justify-content:center;padding:24px;background:rgba(0,0,0,.76)}
+.webos-client .webos-exit-dialog{width:min(560px,90vw);padding:32px;border:1px solid rgba(37,223,255,.35);border-radius:16px;background:#17191f;box-shadow:0 16px 60px rgba(0,0,0,.7)}
+.webos-client .webos-exit-dialog h2{margin:0 0 12px;font-size:32px}.webos-client .webos-exit-dialog p{margin:0;color:#d0d0d0;font-size:18px;line-height:1.4}
+.webos-client .webos-exit-actions{display:flex;justify-content:flex-end;gap:14px;margin-top:28px}
+.webos-client .webos-exit-actions button{min-width:130px;min-height:52px;padding:12px 20px;border:1px solid #555;border-radius:10px;background:#303238;color:#fff;font-size:18px;font-weight:700}
+.webos-client .webos-exit-actions .webos-exit-confirm{border-color:var(--brand-cyan);background:rgba(37,223,255,.16)}
+.webos-client .webos-exit-actions button:focus{outline:0!important;box-shadow:0 0 0 3px var(--brand-cyan)!important}
 .central-hero+.central-row{margin-top:0!important}
 @media(max-width:650px){.central-database-page{padding-top:84px}.central-database-page .central-page-title{font-size:36px}}
 @media(max-width:850px) and (orientation:landscape){.central-settings-layout{align-items:stretch}.central-settings-nav-item{flex:none}}

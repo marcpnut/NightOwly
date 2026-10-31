@@ -311,7 +311,8 @@ async function api<T>(path: string, body?: unknown): Promise<T> {
   })();
   if (cacheable) {
     catalogApiInflight.set(cacheKey, request);
-    void request.finally(() => { if (catalogApiInflight.get(cacheKey) === request) catalogApiInflight.delete(cacheKey); }).catch(() => undefined);
+    const clearInflight = (): void => { if (catalogApiInflight.get(cacheKey) === request) catalogApiInflight.delete(cacheKey); };
+    void request.then(clearInflight, clearInflight);
   }
   return request;
 }
@@ -350,6 +351,7 @@ function fitWebosLivePreview(): void {
 window.addEventListener('resize', () => window.requestAnimationFrame(fitWebosLivePreview));
 function cancelRequest(): void { for (const controller of activeControllers) controller.abort(); activeControllers.clear(); requestGeneration += 1; }
 function navigate(next: View): void {
+  if (next !== 'home') resetWebosHomeBackSequence();
   if (view === 'live' && next !== 'live') resetInlineLiveVideo();
   if (cacheableViews.has(view) && activeCategoryPageScrollHandler) categoryViewScrollHandlers.set(view, activeCategoryPageScrollHandler);
   activeCategoryPageScrollHandler = null;
@@ -409,12 +411,13 @@ function imageUrls(value?: string): string[] {
   if (typeof first === 'string' && /^[\[\"]/.test(first)) {
     try { const parsed: unknown = JSON.parse(first); candidates = Array.isArray(parsed) ? parsed : [parsed]; } catch { /* Keep plain URLs unchanged. */ }
   }
-  return candidates.flatMap((candidate) => {
-    if (typeof candidate !== 'string') return [];
+  return candidates.reduce<string[]>((urls, candidate) => {
+    if (typeof candidate !== 'string') return urls;
     const text = candidate.trim().replace(/^['"]|['"]$/g, '');
-    try { const url = new URL(text); return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password ? [url.href] : []; }
-    catch { return []; }
-  });
+    try { const url = new URL(text); if (['http:', 'https:'].includes(url.protocol) && !url.username && !url.password) urls.push(url.href); }
+    catch { /* Ignore malformed image URLs. */ }
+    return urls;
+  }, []);
 }
 function shortGenres(value?: string): string {
   if (!value) return '';
@@ -576,7 +579,8 @@ async function showMediaShelves(section: 'movies' | 'series'): Promise<void> {
     })));
     if (generation !== requestGeneration) return;
     const feature = home.featured?.kind === kind ? home.featured
-      : curatedRows.flatMap((group) => group.items)[0] ?? categoryPages.flatMap((entry) => entry.page.items)[0];
+      : curatedRows.map((group) => group.items[0]).find((item): item is Item => Boolean(item))
+        ?? categoryPages.map((entry) => entry.page.items[0]).find((item): item is Item => Boolean(item));
     clear(content);
     if (feature) content.appendChild(featuredHero(feature, home.discoverySource));
     curatedRows.forEach((group) => content.appendChild(row(group.title, group.items)));
@@ -1499,7 +1503,7 @@ async function showSettings(): Promise<void> {
     void api<{ connected: boolean; catalogSyncStarted: boolean }>(`/provider/connect`, { baseUrl: providerUrl.value.trim(), username: providerUser.value.trim(), password: providerPass.value })
       .then(() => { providerPass.value = ''; providerMessage.textContent = 'Credentials saved. No provider catalog sync was started.'; })
       .catch((error) => { providerMessage.textContent = errorMessage(error); })
-      .finally(() => { connectProvider.disabled = false; });
+      .then(() => { connectProvider.disabled = false; }, () => { connectProvider.disabled = false; });
   };
   panel.appendChild(form);
   const sync = node('p', undefined, 'Loading catalog status…'); panel.appendChild(sync);
@@ -1518,7 +1522,7 @@ async function showSettings(): Promise<void> {
         invalidateCatalogCache();
         navigate('home');
         window.setTimeout(() => { void preloadBrowseScreens(); }, 0);
-      }).catch((error) => { tmdbMessage.textContent = errorMessage(error); }).finally(() => { saveTmdb.disabled = false; });
+      }).catch((error) => { tmdbMessage.textContent = errorMessage(error); }).then(() => { saveTmdb.disabled = false; }, () => { saveTmdb.disabled = false; });
     };
     panel.appendChild(tmdbForm);
   }
@@ -1564,7 +1568,7 @@ async function showSettings(): Promise<void> {
       void api<{ configured: boolean }>('/opensubtitles/config', { apiKey: apiKey.value.trim() })
         .then((result) => { apiKey.value = ''; message.textContent = result.configured ? 'OpenSubtitles API key saved securely.' : 'OpenSubtitles API key removed.'; openSubtitlesStatus.textContent = result.configured ? 'OpenSubtitles is configured.' : 'OpenSubtitles is not configured.'; })
         .catch((error) => { message.textContent = errorMessage(error); })
-        .finally(() => { saveKey.disabled = false; });
+        .then(() => { saveKey.disabled = false; }, () => { saveKey.disabled = false; });
     };
   }
   const aboutHeading = node('h2', undefined, 'About & credits'); panel.appendChild(aboutHeading);
@@ -2041,7 +2045,7 @@ function showSubtitleMenu(): void {
         results.appendChild(button);
       }
     }).catch((error) => { results.appendChild(node('p', undefined, errorMessage(error))); })
-      .finally(() => { search.disabled = false; search.textContent = 'Search subtitles'; });
+      .then(() => { search.disabled = false; search.textContent = 'Search subtitles'; }, () => { search.disabled = false; search.textContent = 'Search subtitles'; });
   };
   menu.classList.remove('hidden'); revealPlayerControls(); off.focus();
 }
@@ -2074,6 +2078,57 @@ function setPlayPauseIcon(isPaused: boolean): void {
     ? '<svg viewBox="0 0 32 32" aria-hidden="true"><path d="m11 6 15 10-15 10z"/></svg>'
     : '<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M11 7v18M21 7v18"/></svg>';
 }
+let webosHomeBackPresses = 0;
+let webosHomeBackResetTimer = 0;
+let webosBackHintTimer = 0;
+let webosExitPrompt: HTMLElement | null = null;
+function resetWebosHomeBackSequence(): void {
+  webosHomeBackPresses = 0;
+  window.clearTimeout(webosHomeBackResetTimer);
+  window.clearTimeout(webosBackHintTimer);
+  document.getElementById('central-back-hint')?.remove();
+}
+function closeWebosExitPrompt(): void {
+  webosExitPrompt?.remove();
+  webosExitPrompt = null;
+  resetWebosHomeBackSequence();
+  document.querySelector<HTMLButtonElement>('#central-nav [data-view="home"]')?.focus();
+}
+function openWebosExitPrompt(): void {
+  resetWebosHomeBackSequence();
+  const backdrop = node('section', 'webos-exit-backdrop');
+  backdrop.setAttribute('role', 'alertdialog'); backdrop.setAttribute('aria-modal', 'true');
+  const dialog = node('div', 'webos-exit-dialog');
+  const heading = node('h2', undefined, 'Exit NightOwl?');
+  const message = node('p', undefined, 'Your sign-in and viewing data will remain on this TV.');
+  const actions = node('div', 'webos-exit-actions');
+  const stay = node('button', 'webos-exit-stay', 'Stay') as HTMLButtonElement;
+  const exit = node('button', 'webos-exit-confirm', 'Exit app') as HTMLButtonElement;
+  stay.type = 'button'; exit.type = 'button';
+  stay.onclick = closeWebosExitPrompt;
+  exit.onclick = () => window.close();
+  backdrop.addEventListener('keydown', (event) => {
+    if (event.keyCode !== 37 && event.keyCode !== 39) return;
+    event.preventDefault();
+    (document.activeElement === stay ? exit : stay).focus();
+  });
+  actions.append(stay, exit); dialog.append(heading, message, actions); backdrop.appendChild(dialog);
+  document.body.appendChild(backdrop); webosExitPrompt = backdrop; stay.focus();
+}
+function handleWebosHomeBackPress(): boolean {
+  if (!document.body.classList.contains('webos-client') || view !== 'home'
+    || !player.classList.contains('hidden') || app.classList.contains('hidden')) return false;
+  webosHomeBackPresses += 1;
+  window.clearTimeout(webosHomeBackResetTimer);
+  if (webosHomeBackPresses >= 2) { openWebosExitPrompt(); return true; }
+  let hint = document.getElementById('central-back-hint');
+  if (!hint) { hint = node('div', 'webos-back-hint'); hint.id = 'central-back-hint'; document.body.appendChild(hint); }
+  hint.textContent = 'Press Back once more to exit.';
+  window.clearTimeout(webosBackHintTimer);
+  webosBackHintTimer = window.setTimeout(() => { document.getElementById('central-back-hint')?.remove(); }, 1800);
+  webosHomeBackResetTimer = window.setTimeout(resetWebosHomeBackSequence, 3500);
+  return true;
+}
 video.onpause = () => { setPlayPauseIcon(true); revealPlayerControls(); };
 video.onplay = () => { setPlayPauseIcon(false); revealPlayerControls(); };
 player.addEventListener('pointermove', () => { if (!player.classList.contains('hidden')) revealPlayerControls(); });
@@ -2087,13 +2142,14 @@ document.addEventListener('keydown', (event) => {
   if ((active?.tagName === 'INPUT' || active?.tagName === 'TEXTAREA') && !isBack && !seekInputActive) return;
   if (isBack) {
     event.preventDefault();
+    if (webosExitPrompt) { closeWebosExitPrompt(); return; }
     if (!player.classList.contains('hidden') && !el('central-player-stream-menu').classList.contains('hidden')) {
       el('central-player-stream-menu').classList.add('hidden'); el<HTMLButtonElement>('central-audio').focus();
     }
     else if (!player.classList.contains('hidden')) closePlayer();
     else if (view === 'detail') backFromDetail();
     else if (view !== 'home') navigate('home');
-    else document.querySelector<HTMLButtonElement>('#central-nav [data-view="home"]')?.focus();
+    else if (!handleWebosHomeBackPress()) document.querySelector<HTMLButtonElement>('#central-nav [data-view="home"]')?.focus();
     return;
   }
   if (key === 23 && active?.tagName === 'BUTTON') { event.preventDefault(); active.click(); return; }
