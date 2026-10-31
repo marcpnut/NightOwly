@@ -147,6 +147,12 @@ let hiddenLiveCategoryIds = (() => {
   try { const saved = JSON.parse(localStorage.getItem('streamcinema.hidden-live-categories') || '[]') as unknown; return new Set(Array.isArray(saved) ? saved.filter((id): id is string => typeof id === 'string') : []); }
   catch { return new Set<string>(); }
 })();
+function readHiddenCategories(key: string): Set<string> {
+  try { const saved = JSON.parse(localStorage.getItem(key) || '[]') as unknown; return new Set(Array.isArray(saved) ? saved.filter((id): id is string => typeof id === 'string') : []); }
+  catch { return new Set<string>(); }
+}
+let hiddenMovieCategoryIds = readHiddenCategories('streamcinema.hidden-movie-categories');
+let hiddenSeriesCategoryIds = readHiddenCategories('streamcinema.hidden-series-categories');
 let selectedLiveSearch = '';
 let liveSearchTimer = 0;
 let liveSearchGeneration = 0;
@@ -569,6 +575,8 @@ function fitWebosLivePreview(): void {
 window.addEventListener('resize', () => window.requestAnimationFrame(fitWebosLivePreview));
 function cancelRequest(): void { for (const controller of activeControllers) controller.abort(); activeControllers.clear(); requestGeneration += 1; }
 function navigate(next: View): void {
+  if (activeCategoryJumpMenu?.panel.classList.contains('open')) activeCategoryJumpMenu.close(false);
+  activeCategoryJumpMenu = null;
   if (next !== 'home') resetWebosHomeBackSequence();
   if (view === 'live' && next !== 'live') resetInlineLiveVideo();
   if (cacheableViews.has(view) && activeCategoryPageScrollHandler) categoryViewScrollHandlers.set(view, activeCategoryPageScrollHandler);
@@ -606,6 +614,8 @@ function navigate(next: View): void {
   if (restored && cached) {
     cachedViews.delete(next);
     content.appendChild(cached.content);
+    const restoredMenu = content.querySelector<HTMLElement>('.central-category-jump-menu') as (HTMLElement & { categoryJumpState?: CategoryJumpMenuState }) | null;
+    activeCategoryJumpMenu = restoredMenu?.categoryJumpState ?? null;
     activeCategoryPageScrollHandler = categoryViewScrollHandlers.get(next) ?? null;
     scrollWindowTo(cached.scrollY);
     window.requestAnimationFrame(() => activeCategoryPageScrollHandler?.());
@@ -691,8 +701,27 @@ function focusReturnedCard(root: HTMLElement): void {
   (preferred ?? root.querySelector<HTMLButtonElement>('button'))?.focus();
   restoreCardKey = '';
 }
+function focusWithoutMovingScroll(target: HTMLElement): void {
+  const windowLeft = window.scrollX, windowTop = window.scrollY;
+  const ancestors: Array<{ element: HTMLElement; left: number; top: number }> = [];
+  let ancestor = target.parentElement;
+  while (ancestor) {
+    if (ancestor.scrollWidth > ancestor.clientWidth || ancestor.scrollHeight > ancestor.clientHeight) {
+      ancestors.push({ element: ancestor, left: ancestor.scrollLeft, top: ancestor.scrollTop });
+    }
+    ancestor = ancestor.parentElement;
+  }
+  try { target.focus({ preventScroll: true }); } catch { target.focus(); }
+  const root = document.documentElement;
+  const oldBehavior = root.style.scrollBehavior;
+  root.style.scrollBehavior = 'auto';
+  ancestors.forEach(({ element, left, top }) => { element.scrollLeft = left; element.scrollTop = top; });
+  if (window.scrollX !== windowLeft || window.scrollY !== windowTop) window.scrollTo(windowLeft, windowTop);
+  root.style.scrollBehavior = oldBehavior;
+}
 function focusShelfCard(target: HTMLButtonElement, shelf: HTMLElement): void {
   if (!shelf.isConnected) return;
+  focusWithoutMovingScroll(target);
   // Start the viewport move in the same event frame as focus changes, so the
   // highlighted card travels with its row instead of appearing detached first.
   const rows = Array.from(content.querySelectorAll<HTMLElement>('.central-row'));
@@ -715,10 +744,9 @@ function focusShelfCard(target: HTMLButtonElement, shelf: HTMLElement): void {
       if (delta) scrollWindowTo(window.scrollY + delta);
     }
   }
-  target.focus();
 }
 function focusShelfItem(list: HTMLElement, target: HTMLButtonElement): void {
-  target.focus();
+  focusWithoutMovingScroll(target);
   const listRect = list.getBoundingClientRect();
   const cardRect = target.getBoundingClientRect();
   const webos = document.body.classList.contains('webos-client');
@@ -726,6 +754,63 @@ function focusShelfItem(list: HTMLElement, target: HTMLButtonElement): void {
   const visibleRight = listRect.right - (webos ? 56 : 12);
   if (cardRect.right > visibleRight) list.scrollLeft += cardRect.right - visibleRight + 8;
   else if (cardRect.left < visibleLeft) list.scrollLeft -= visibleLeft - cardRect.left + 8;
+}
+type CategoryJumpMenuState = { section: 'movies' | 'series' | 'live'; toggle: HTMLButtonElement; panel: HTMLElement; list: HTMLElement; categories: BrowseCategory[]; open: () => void; close: (returnFocus?: boolean) => void };
+let activeCategoryJumpMenu: CategoryJumpMenuState | null = null;
+function addCategoryJumpMenu(section: 'movies' | 'series' | 'live', categories: BrowseCategory[], selectCategory: (category: BrowseCategory) => void | Promise<void>): void {
+  if (!categories.length) return;
+  const toggle = node('button', 'central-category-jump-toggle', 'Categories') as HTMLButtonElement;
+  toggle.type = 'button'; toggle.setAttribute('aria-expanded', 'false'); toggle.setAttribute('aria-label', 'Open category menu');
+  const panel = node('aside', 'central-category-jump-menu'); panel.setAttribute('aria-label', `${section === 'series' ? 'Show' : section === 'live' ? 'Live TV' : 'Movie'} categories`);
+  const heading = node('div', 'central-category-jump-heading'); heading.appendChild(node('strong', '', 'Categories'));
+  const close = node('button', 'central-category-jump-close', '×') as HTMLButtonElement; close.type = 'button'; close.setAttribute('aria-label', 'Close categories'); heading.appendChild(close);
+  const list = node('div', 'central-category-jump-list');
+  panel.append(heading, list);
+  const state = { section, toggle, panel, list, categories, open: (): void => undefined, close: (): void => undefined } as CategoryJumpMenuState;
+  const closeMenu = (returnFocus = true): void => {
+    panel.classList.remove('open'); toggle.classList.remove('is-open'); toggle.setAttribute('aria-expanded', 'false');
+    if (returnFocus) toggle.focus();
+  };
+  const openMenu = (): void => {
+    panel.classList.add('open'); toggle.classList.add('is-open'); toggle.setAttribute('aria-expanded', 'true');
+    const preferred = list.querySelector<HTMLButtonElement>('[aria-current="true"]') ?? list.querySelector<HTMLButtonElement>('button');
+    preferred?.focus();
+  };
+  state.open = openMenu; state.close = closeMenu; activeCategoryJumpMenu = state;
+  const renderItems = (): void => {
+    clear(list);
+    categories.forEach((category) => {
+      const option = node('button', 'central-category-jump-option', category.name) as HTMLButtonElement;
+      option.type = 'button'; option.dataset.categoryId = category.id;
+      option.setAttribute('aria-current', category.id === selectedCategoryBySection[section] ? 'true' : 'false');
+      option.onclick = () => {
+        selectedCategoryBySection[section] = category.id;
+        list.querySelectorAll<HTMLButtonElement>('.central-category-jump-option').forEach((entry) => entry.setAttribute('aria-current', entry.dataset.categoryId === category.id ? 'true' : 'false'));
+        closeMenu(false); void selectCategory(category);
+      };
+      list.appendChild(option);
+    });
+  };
+  renderItems(); toggle.onclick = () => panel.classList.contains('open') ? closeMenu() : openMenu(); close.onclick = () => closeMenu();
+  panel.addEventListener('keydown', (event) => {
+    const active = document.activeElement as HTMLElement | null;
+    const options = Array.from(list.querySelectorAll<HTMLButtonElement>('button'));
+    const index = options.indexOf(active as HTMLButtonElement);
+    if (event.key === 'Escape' || event.key === 'Backspace' || event.keyCode === 461 || event.keyCode === 10009) {
+      event.preventDefault(); event.stopPropagation(); closeMenu(); return;
+    }
+    if (event.key === 'ArrowLeft') { event.preventDefault(); event.stopPropagation(); closeMenu(); return; }
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      const next = options[index + (event.key === 'ArrowDown' ? 1 : -1)];
+      if (next) { event.preventDefault(); event.stopPropagation(); next.focus(); next.scrollIntoView({ block: 'nearest' }); }
+      return;
+    }
+    if (event.key === 'ArrowRight') {
+      if (active instanceof HTMLButtonElement && active.dataset.categoryId) { event.preventDefault(); event.stopPropagation(); active.click(); }
+    }
+  });
+  (panel as HTMLElement & { categoryJumpState?: CategoryJumpMenuState }).categoryJumpState = state;
+  content.append(toggle, panel);
 }
 function row(title: string, items: Item[], maxItems = 20): HTMLElement {
   const section = node('section', 'central-row');
@@ -817,7 +902,8 @@ async function showMediaShelves(section: 'movies' | 'series'): Promise<void> {
       .map((group) => ({ ...group, items: group.items.filter((item) => item.kind === kind) }))
       .filter((group) => group.items.length).slice(0, 5);
     const typeOrder: Record<string, number> = { genre: 0, platform: 1, collection: 2, quality: 3, other: 4 };
-    const categories = categoryResponse.items.filter((group) => group.id && group.name && (group.itemCount ?? 1) > 0)
+    const hidden = section === 'movies' ? hiddenMovieCategoryIds : hiddenSeriesCategoryIds;
+    const categories = categoryResponse.items.filter((group) => group.id && group.name && (group.itemCount ?? 1) > 0 && !hidden.has(group.id))
       .sort((a, b) => (typeOrder[a.type ?? 'other'] ?? 5) - (typeOrder[b.type ?? 'other'] ?? 5)
         || (b.itemCount ?? 0) - (a.itemCount ?? 0) || a.name.localeCompare(b.name));
     const initialCategories = categories.slice(0, Math.max(0, 10 - curatedRows.length));
@@ -840,6 +926,7 @@ async function showMediaShelves(section: 'movies' | 'series'): Promise<void> {
       api<CatalogPage>(`/${section}?page=${nextPage}&limit=20&language=${encodeURIComponent(appLanguage)}&category=${encodeURIComponent(group.id)}`));
     const attachCategoryRow = (record: CategoryRowRecord, playlist: HTMLElement, before: HTMLElement | null): void => {
       playlist.dataset.categoryIndex = `${categoryRows.indexOf(record)}`;
+      playlist.dataset.categoryId = record.group.id;
       const spacer = record.spacer;
       record.row = playlist; record.spacer = null;
       if (spacer?.parentElement === categoryShelfContainer) categoryShelfContainer.replaceChild(playlist, spacer);
@@ -949,6 +1036,20 @@ async function showMediaShelves(section: 'movies' | 'series'): Promise<void> {
     activeCategoryPageScrollHandler = onCategoryPageScroll;
     if (loadedCategoryCount < categories.length) categoryObserver.observe(categorySentinel);
     else categorySentinel.remove();
+    addCategoryJumpMenu(section, categories, async (group) => {
+      const targetIndex = categories.findIndex((category) => category.id === group.id);
+      while (targetIndex >= loadedCategoryCount && loadedCategoryCount < categories.length && view === section) {
+        if (categoryBatchLoading) await new Promise((resolve) => window.setTimeout(resolve, 40));
+        else await appendNextCategoryBatch(false);
+      }
+      const record = categoryRows.find((entry) => entry.group.id === group.id);
+      if (!record) return;
+      if (record.spacer) await loadCategoryRow(record);
+      const targetRow = record.row;
+      const firstCard = targetRow?.querySelector<HTMLButtonElement>('[data-card-key]');
+      if (targetRow && firstCard) focusShelfCard(firstCard, targetRow);
+      else if (targetRow) targetRow.scrollIntoView({ block: 'start' });
+    });
     setStatus('');
     (content.querySelector<HTMLButtonElement>('.central-hero-actions button')
       ?? content.querySelector<HTMLButtonElement>('[data-card-key]'))?.focus();
@@ -966,7 +1067,8 @@ async function preloadMediaShelves(section: 'movies' | 'series'): Promise<void> 
   const curatedCount = home.rows.filter((group) => rowIds.has(group.id)
     && group.items.some((item) => item.kind === kind)).length;
   const typeOrder: Record<string, number> = { genre: 0, platform: 1, collection: 2, quality: 3, other: 4 };
-  const categories = categoryResponse.items.filter((group) => group.id && group.name && (group.itemCount ?? 1) > 0)
+  const hidden = section === 'movies' ? hiddenMovieCategoryIds : hiddenSeriesCategoryIds;
+  const categories = categoryResponse.items.filter((group) => group.id && group.name && (group.itemCount ?? 1) > 0 && !hidden.has(group.id))
     .sort((a, b) => (typeOrder[a.type ?? 'other'] ?? 5) - (typeOrder[b.type ?? 'other'] ?? 5)
       || (b.itemCount ?? 0) - (a.itemCount ?? 0) || a.name.localeCompare(b.name));
   const initialCategories = categories.slice(0, Math.max(0, 10 - Math.min(5, curatedCount)));
@@ -1262,6 +1364,15 @@ async function showList(section: 'movies' | 'series' | 'live', append = false, c
       if (section === 'live') window.requestAnimationFrame(fitWebosLivePreview);
     }
     else content.appendChild(grid);
+    if (section === 'live') {
+      const jumpCategories = categoryResult.items.filter((group) => group.id && group.name && !hiddenLiveCategoryIds.has(group.id));
+      addCategoryJumpMenu('live', jumpCategories, (group) => {
+        selectedLiveCountry = liveCategoryCode(group.name);
+        selectedLiveSearch = '';
+        selectedCategoryBySection.live = group.id;
+        void showList('live', false, group.id, selectedLiveCountry, '');
+      });
+    }
     if (section === 'live') grid.scrollTop = 0;
     liveGrid = section === 'live' ? grid : null;
     fetchLivePage = async (): Promise<void> => {
@@ -1859,6 +1970,8 @@ async function showSettings(): Promise<void> {
   makeGroup('Preferences');
   const subtitlesPage = makePage('preferences-subtitles', 'Subtitles');
   const liveCategoriesPage = makePage('preferences-live', 'Live TV categories');
+  const movieCategoriesPage = makePage('preferences-movies', 'Movie categories');
+  const seriesCategoriesPage = makePage('preferences-series', 'Show categories');
   makeGroup('Credentials');
   const xtreamPage = makePage('credentials-xtream', 'Xtream provider');
   const tmdbPage = makePage('credentials-tmdb', 'TMDB API key');
@@ -1929,56 +2042,68 @@ async function showSettings(): Promise<void> {
     void api('/provider/sync', {}).then(() => updateDatabaseSummary())
       .catch((error) => { databaseRefreshStatus.textContent = errorMessage(error); databaseRefresh.disabled = false; });
   };
-  const categoryDescription = node('p', 'central-settings-description', 'Choose which provider categories appear in Live TV. Hidden categories are excluded from channel lists and search.');
-  const categoryLanguageLabel = node('label', 'central-settings-category-language');
-  categoryLanguageLabel.appendChild(node('span', undefined, 'Language'));
-  const categoryLanguage = node('select', 'central-category-select') as HTMLSelectElement;
-  categoryLanguage.setAttribute('aria-label', 'Filter categories by language');
-  categoryLanguage.appendChild(new Option('All languages', ''));
-  categoryLanguageLabel.appendChild(categoryLanguage);
-  const categoryActions = node('div', 'central-settings-category-actions');
-  const showAllCategories = node('button', 'central-more', 'Show all') as HTMLButtonElement; showAllCategories.type = 'button';
-  const hideAllCategories = node('button', 'central-more', 'Hide all') as HTMLButtonElement; hideAllCategories.type = 'button';
-  categoryActions.append(showAllCategories, hideAllCategories);
-  const liveCategoryGrid = node('div', 'central-settings-live-category-grid');
-  const liveCategoryStatus = node('p', 'provider-message', 'Loading Live TV categories…');
-  liveCategoriesPage.append(categoryDescription, categoryLanguageLabel, categoryActions, liveCategoryStatus, liveCategoryGrid);
-  let liveSettingsCategories: BrowseCategory[] = [];
-  const persistHiddenLiveCategories = (): void => {
-    localStorage.setItem('streamcinema.hidden-live-categories', JSON.stringify([...hiddenLiveCategoryIds]));
-    if (selectedCategoryBySection.live && hiddenLiveCategoryIds.has(selectedCategoryBySection.live)) selectedCategoryBySection.live = '';
+  type CategorySettingsUi = { page: HTMLElement; section: 'live' | 'movies' | 'series'; filter: HTMLSelectElement; actions: HTMLButtonElement[]; grid: HTMLElement; status: HTMLElement; categories: BrowseCategory[]; hidden: Set<string>; storageKey: string };
+  const categorySettingsUis: CategorySettingsUi[] = [];
+  const buildCategorySettings = (pageElement: HTMLElement, section: 'live' | 'movies' | 'series', hidden: Set<string>, storageKey: string): CategorySettingsUi => {
+    const label = section === 'live' ? 'Live TV' : section === 'movies' ? 'movie' : 'show';
+    const description = node('p', 'central-settings-description', `Choose which provider categories appear in ${label}. Hidden categories are omitted from the ${section === 'live' ? 'channel' : label} category shelves.`);
+    const filterLabel = node('label', 'central-settings-category-language');
+    filterLabel.appendChild(node('span', undefined, 'Language'));
+    const filter = node('select', 'central-category-select') as HTMLSelectElement;
+    filter.setAttribute('aria-label', 'Filter categories by language');
+    filter.appendChild(new Option('All languages', ''));
+    filterLabel.appendChild(filter);
+    const actionsWrap = node('div', 'central-settings-category-actions');
+    const showAll = node('button', 'central-more', 'Show all') as HTMLButtonElement; showAll.type = 'button';
+    const hideAll = node('button', 'central-more', 'Hide all') as HTMLButtonElement; hideAll.type = 'button';
+    actionsWrap.append(showAll, hideAll);
+    const grid = node('div', 'central-settings-live-category-grid central-settings-category-grid');
+    const statusText = node('p', 'provider-message', `Loading ${label} categories…`);
+    pageElement.append(description, filterLabel, actionsWrap, statusText, grid);
+    const ui: CategorySettingsUi = { page: pageElement, section, filter, actions: [showAll, hideAll], grid, status: statusText, categories: [], hidden, storageKey };
+    categorySettingsUis.push(ui);
+    const persist = (): void => {
+      localStorage.setItem(storageKey, JSON.stringify([...hidden]));
+      if (selectedCategoryBySection[section] && hidden.has(selectedCategoryBySection[section])) selectedCategoryBySection[section] = '';
+      if (section === 'movies' || section === 'series') cachedViews.delete(section);
+    };
+    const matchingCategories = (): BrowseCategory[] => ui.categories.filter((category) => !filter.value || liveCategoryCode(category.name) === filter.value);
+    const render = (): void => {
+      const categories = matchingCategories(); clear(grid);
+      categories.forEach((category) => {
+        const option = node('label', 'central-settings-live-category-option');
+        const checkbox = node('input') as HTMLInputElement; checkbox.type = 'checkbox'; checkbox.checked = !hidden.has(category.id);
+        checkbox.onchange = () => {
+          if (checkbox.checked) hidden.delete(category.id); else hidden.add(category.id);
+          persist();
+        };
+        option.append(checkbox, document.createTextNode(category.name)); grid.appendChild(option);
+      });
+      statusText.textContent = categories.length ? `${categories.length} categories shown in this language filter.` : 'No categories match this language filter.';
+    };
+    filter.onchange = render;
+    showAll.onclick = () => { matchingCategories().forEach((item) => hidden.delete(item.id)); persist(); render(); };
+    hideAll.onclick = () => { matchingCategories().forEach((item) => hidden.add(item.id)); persist(); render(); };
+    void api<{ items: BrowseCategory[] }>(`/${section}/categories?language=${encodeURIComponent(appLanguage)}`).then((result) => {
+      ui.categories = result.items;
+      [...new Set(ui.categories.map((item) => liveCategoryCode(item.name)))].sort((a, b) => a === 'other' ? 1 : b === 'other' ? -1 : a.localeCompare(b))
+        .forEach((code) => filter.appendChild(new Option(code === 'other' ? 'Other' : code, code)));
+      render();
+    }).catch((error) => { statusText.textContent = errorMessage(error); });
+    return ui;
   };
-  const renderLiveCategoryOptions = (): void => {
-    const selectedCode = categoryLanguage.value;
-    const shownCategories = liveSettingsCategories.filter((item) => !selectedCode || liveCategoryCode(item.name) === selectedCode);
-    clear(liveCategoryGrid);
-    shownCategories.forEach((category) => {
-      const option = node('label', 'central-settings-live-category-option');
-      const checkbox = node('input') as HTMLInputElement; checkbox.type = 'checkbox'; checkbox.checked = !hiddenLiveCategoryIds.has(category.id);
-      checkbox.onchange = () => {
-        if (checkbox.checked) hiddenLiveCategoryIds.delete(category.id); else hiddenLiveCategoryIds.add(category.id);
-        persistHiddenLiveCategories();
-      };
-      option.append(checkbox, document.createTextNode(category.name)); liveCategoryGrid.appendChild(option);
-    });
-    liveCategoryStatus.textContent = shownCategories.length ? `${shownCategories.length} categories shown in this language filter.` : 'No categories match this language filter.';
-  };
-  categoryLanguage.onchange = renderLiveCategoryOptions;
-  showAllCategories.onclick = () => { liveSettingsCategories.filter((item) => !categoryLanguage.value || liveCategoryCode(item.name) === categoryLanguage.value).forEach((item) => hiddenLiveCategoryIds.delete(item.id)); persistHiddenLiveCategories(); renderLiveCategoryOptions(); };
-  hideAllCategories.onclick = () => { liveSettingsCategories.filter((item) => !categoryLanguage.value || liveCategoryCode(item.name) === categoryLanguage.value).forEach((item) => hiddenLiveCategoryIds.add(item.id)); persistHiddenLiveCategories(); renderLiveCategoryOptions(); };
-  void api<{ items: BrowseCategory[] }>(`/live/categories?language=${encodeURIComponent(appLanguage)}`).then((result) => {
-    liveSettingsCategories = result.items;
-    [...new Set(liveSettingsCategories.map((item) => liveCategoryCode(item.name)))].sort((a, b) => a === 'other' ? 1 : b === 'other' ? -1 : a.localeCompare(b))
-      .forEach((code) => categoryLanguage.appendChild(new Option(code === 'other' ? 'Other' : code, code)));
-    renderLiveCategoryOptions();
-  }).catch((error) => { liveCategoryStatus.textContent = errorMessage(error); });
+  buildCategorySettings(liveCategoriesPage, 'live', hiddenLiveCategoryIds, 'streamcinema.hidden-live-categories');
+  buildCategorySettings(movieCategoriesPage, 'movies', hiddenMovieCategoryIds, 'streamcinema.hidden-movie-categories');
+  buildCategorySettings(seriesCategoriesPage, 'series', hiddenSeriesCategoryIds, 'streamcinema.hidden-series-categories');
   selectSettingsPage(activeSettingsPage);
   layout.append(sidebar, pageHost); panel.appendChild(layout); content.appendChild(panel);
   layout.addEventListener('keydown', (event) => {
     const active = document.activeElement as HTMLElement | null;
     if (!active || !['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return;
-    const categoryGrid = active.closest<HTMLElement>('.central-settings-live-category-grid');
+    const categoryGrid = active.closest<HTMLElement>('.central-settings-category-grid');
     if (categoryGrid && active instanceof HTMLInputElement && active.type === 'checkbox') {
+      const ui = categorySettingsUis.find((entry) => entry.grid === categoryGrid);
+      if (!ui) return;
       const currentRect = active.getBoundingClientRect();
       const currentX = currentRect.left + currentRect.width / 2, currentY = currentRect.top + currentRect.height / 2;
       const direction = event.key;
@@ -1992,11 +2117,12 @@ async function showSettings(): Promise<void> {
       const next = choices[0]?.input;
       event.preventDefault(); event.stopPropagation();
       if (next) { next.focus(); next.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' }); }
-      else if (direction === 'ArrowUp') { showAllCategories.focus(); showAllCategories.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }
+      else if (direction === 'ArrowUp') { ui.actions[0].focus(); ui.actions[0].scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }
       return;
     }
-    if (active.closest('.central-settings-category-actions')) {
-      const actions = [showAllCategories, hideAllCategories];
+    const activeUi = categorySettingsUis.find((ui) => ui.actions.includes(active as HTMLButtonElement));
+    if (activeUi) {
+      const actions = activeUi.actions;
       const index = actions.indexOf(active as HTMLButtonElement);
       if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
         const next = actions[index + (event.key === 'ArrowRight' ? 1 : -1)];
@@ -2004,16 +2130,17 @@ async function showSettings(): Promise<void> {
         return;
       }
       if (event.key === 'ArrowUp') {
-        event.preventDefault(); event.stopPropagation(); categoryLanguage.focus(); categoryLanguage.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); return;
+        event.preventDefault(); event.stopPropagation(); activeUi.filter.focus(); activeUi.filter.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); return;
       }
       if (event.key === 'ArrowDown') {
-        const firstCategory = liveCategoryGrid.querySelector<HTMLInputElement>('input[type="checkbox"]');
+        const firstCategory = activeUi.grid.querySelector<HTMLInputElement>('input[type="checkbox"]');
         if (firstCategory) { event.preventDefault(); event.stopPropagation(); firstCategory.focus(); firstCategory.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }
         return;
       }
     }
-    if (active === categoryLanguage && event.key === 'ArrowDown') {
-      event.preventDefault(); event.stopPropagation(); showAllCategories.focus(); showAllCategories.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); return;
+    const activeCategoryUi = categorySettingsUis.find((ui) => ui.filter === active);
+    if (activeCategoryUi && event.key === 'ArrowDown') {
+      event.preventDefault(); event.stopPropagation(); activeCategoryUi.actions[0].focus(); activeCategoryUi.actions[0].scrollIntoView({ block: 'nearest', behavior: 'smooth' }); return;
     }
     if (active.closest('.central-settings-sidebar')) {
       if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
@@ -2409,6 +2536,9 @@ document.addEventListener('keydown', (event) => {
     else if (key === 13 || key === 23 || key === 32) (document.activeElement === exit ? exit : stay).click();
     return;
   }
+  if (activeCategoryJumpMenu?.panel.classList.contains('open') && isBack) {
+    event.preventDefault(); event.stopPropagation(); activeCategoryJumpMenu.close(); return;
+  }
   if ((active?.tagName === 'INPUT' || active?.tagName === 'TEXTAREA') && key === 8) return;
   const seekInputActive = active?.id === 'central-player-track';
   if ((active?.tagName === 'INPUT' || active?.tagName === 'TEXTAREA') && !isBack && !seekInputActive) return;
@@ -2426,6 +2556,16 @@ document.addEventListener('keydown', (event) => {
   }
   if (key === 23 && active?.tagName === 'BUTTON') { event.preventDefault(); active.click(); return; }
   const playerOpen = !player.classList.contains('hidden');
+  if (!playerOpen && key === 37 && activeCategoryJumpMenu?.section === view && active?.closest('.central-card')) {
+    const cardButton = active.closest<HTMLButtonElement>('.central-card');
+    const liveGrid = cardButton?.closest<HTMLElement>('.central-live-grid');
+    const shelf = cardButton?.closest<HTMLElement>('.central-cards');
+    const cards = liveGrid ? Array.from(liveGrid.querySelectorAll<HTMLButtonElement>('.central-card'))
+      : shelf ? Array.from(shelf.querySelectorAll<HTMLButtonElement>('.central-card')) : [];
+    const index = cardButton ? cards.indexOf(cardButton) : -1;
+    const isLeftEdge = liveGrid ? index >= 0 && index % 6 === 0 : index === 0;
+    if (isLeftEdge) { event.preventDefault(); event.stopPropagation(); activeCategoryJumpMenu.open(); return; }
+  }
   if (!playerOpen && document.body.classList.contains('webos-client') && (key === 37 || key === 39)) {
     const liveGrid = active?.closest<HTMLElement>('.central-live-grid');
     const channelCard = active?.closest<HTMLButtonElement>('.central-live-grid .central-card[data-card-key]');
