@@ -195,6 +195,86 @@ function node<K extends keyof HTMLElementTagNameMap>(tag: K, className?: string,
   if (text !== undefined) element.textContent = text;
   return element;
 }
+function enhanceWebosSelects(root: ParentNode): void {
+  if (!document.body.classList.contains('webos-client')) return;
+  root.querySelectorAll<HTMLSelectElement>('select.central-category-select:not([data-webos-select])').forEach((select) => {
+    const parent = select.parentNode;
+    if (!parent) return;
+    select.dataset.webosSelect = 'true';
+    const wrapper = node('div', 'webos-select');
+    const trigger = node('button', 'webos-select-trigger') as HTMLButtonElement;
+    trigger.type = 'button'; trigger.setAttribute('role', 'combobox'); trigger.setAttribute('aria-haspopup', 'listbox');
+    trigger.setAttribute('aria-expanded', 'false');
+    const menu = node('div', 'webos-select-menu'); menu.setAttribute('role', 'listbox'); menu.setAttribute('aria-label', select.getAttribute('aria-label') || 'Options');
+    const options = (): HTMLButtonElement[] => Array.from(menu.querySelectorAll<HTMLButtonElement>('[role="option"]'));
+    const selectedIndex = (): number => Math.max(0, options().findIndex((option) => option.dataset.value === select.value));
+    const close = (returnFocus = false): void => {
+      wrapper.classList.remove('is-open'); trigger.setAttribute('aria-expanded', 'false');
+      if (returnFocus) trigger.focus();
+    };
+    const choose = (option: HTMLButtonElement): void => {
+      select.value = option.dataset.value ?? '';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+      trigger.textContent = option.textContent ?? '';
+      options().forEach((candidate) => candidate.setAttribute('aria-selected', `${candidate === option}`));
+      close(true);
+    };
+    const rebuild = (): void => {
+      clear(menu);
+      Array.from(select.options).forEach((nativeOption) => {
+        const option = node('button', 'webos-select-option', nativeOption.textContent ?? '') as HTMLButtonElement;
+        option.type = 'button'; option.tabIndex = -1; option.setAttribute('role', 'option');
+        option.dataset.value = nativeOption.value;
+        option.disabled = nativeOption.disabled;
+        option.onclick = () => choose(option);
+        menu.appendChild(option);
+      });
+      const active = options()[selectedIndex()];
+      trigger.textContent = active?.textContent ?? '';
+      options().forEach((candidate) => candidate.setAttribute('aria-selected', `${candidate === active}`));
+    };
+    const open = (index = selectedIndex()): void => {
+      rebuild(); wrapper.classList.add('is-open'); trigger.setAttribute('aria-expanded', 'true');
+      const option = options()[Math.max(0, Math.min(options().length - 1, index))];
+      option?.focus(); option?.scrollIntoView({ block: 'nearest' });
+    };
+    trigger.onclick = () => wrapper.classList.contains('is-open') ? close() : open();
+    wrapper.addEventListener('keydown', (event) => {
+      const key = event.keyCode;
+      const activeOptions = options();
+      const activeIndex = activeOptions.indexOf(document.activeElement as HTMLButtonElement);
+      const isBack = [461, 10009, 8, 27].includes(key) || ['Escape', 'BrowserBack'].includes(event.key);
+      if (wrapper.classList.contains('is-open')) {
+        if (isBack) { event.preventDefault(); event.stopImmediatePropagation(); close(true); return; }
+        if (key === 38 || key === 40) {
+          event.preventDefault(); event.stopImmediatePropagation();
+          const nextIndex = activeIndex < 0 ? selectedIndex() : Math.max(0, Math.min(activeOptions.length - 1, activeIndex + (key === 40 ? 1 : -1)));
+          activeOptions[nextIndex]?.focus(); activeOptions[nextIndex]?.scrollIntoView({ block: 'nearest' }); return;
+        }
+        if (key === 13 || key === 23 || key === 32) {
+          event.preventDefault(); event.stopImmediatePropagation();
+          if (activeIndex >= 0) choose(activeOptions[activeIndex]); else close(true);
+          return;
+        }
+      } else if (event.target === trigger && (key === 13 || key === 23 || key === 32 || key === 38 || key === 40)) {
+        event.preventDefault(); event.stopImmediatePropagation(); open();
+      }
+    });
+    wrapper.addEventListener('focusout', () => window.setTimeout(() => {
+      if (!wrapper.contains(document.activeElement)) close();
+    }, 0));
+    parent.insertBefore(wrapper, select); wrapper.appendChild(trigger); wrapper.appendChild(menu); wrapper.appendChild(select);
+    select.classList.add('webos-native-select');
+    select.tabIndex = -1; select.setAttribute('aria-hidden', 'true');
+    select.addEventListener('change', rebuild);
+    rebuild();
+  });
+}
+if (document.body.classList.contains('webos-client')) {
+  const webosSelectObserver = new MutationObserver(() => enhanceWebosSelects(document.body));
+  webosSelectObserver.observe(document.body, { childList: true, subtree: true });
+  enhanceWebosSelects(document.body);
+}
 function updatePageScrollControls(): void {
   const visible = !app.classList.contains('hidden') && player.classList.contains('hidden') && view !== 'profiles' && view !== 'settings';
   const searchResults = view === 'search' ? content.querySelector<HTMLElement>('.central-search-results') : null;
@@ -276,6 +356,7 @@ window.addEventListener('scroll', () => { updatePageScrollControls(); scheduleHe
 window.addEventListener('resize', () => { updatePageScrollControls(); scheduleHeaderTextFade(); });
 new MutationObserver(() => { updatePageScrollControls(); scheduleHeaderTextFade(); }).observe(content, { childList: true, subtree: true });
 let shelfSequence = 0;
+const shelfPageLoaders = new WeakMap<HTMLElement, () => Promise<void>>();
 function addShelfControls(section: HTMLElement, list: HTMLElement): void {
   const shelf = node('div', 'central-shelf');
   const listId = `central-shelf-${++shelfSequence}`; list.id = listId;
@@ -554,6 +635,13 @@ function focusShelfCard(target: HTMLButtonElement, shelf: HTMLElement): void {
     if (delta) scrollWindowTo(window.scrollY + delta);
   });
 }
+function focusShelfItem(list: HTMLElement, target: HTMLButtonElement): void {
+  target.focus();
+  const listRect = list.getBoundingClientRect();
+  const cardRect = target.getBoundingClientRect();
+  if (cardRect.right > listRect.right) list.scrollLeft += cardRect.right - listRect.right + 14;
+  else if (cardRect.left < listRect.left) list.scrollLeft -= listRect.left - cardRect.left + 14;
+}
 function row(title: string, items: Item[], maxItems = 20): HTMLElement {
   const section = node('section', 'central-row');
   section.appendChild(node('h2', undefined, title));
@@ -590,23 +678,34 @@ function playlistRow(title: string, firstPage: CatalogPage, loadPage?: (page: nu
   const list = node('div', 'central-cards');
   firstPage.items.slice(0, 20).forEach((item) => list.appendChild(card(item)));
   addShelfControls(section, list);
-  let page = 1, hasMore = firstPage.hasMore, loading = false;
-  const appendNextPage = async (): Promise<void> => {
-    if (!loadPage || !hasMore || loading) return;
-    loading = true;
-    try {
-      const next = await loadPage(page + 1);
-      if (!next.items.length) hasMore = false;
-      else {
-        page += 1; hasMore = next.hasMore;
-        const cards = next.items.map((item) => card(item));
-        cards.forEach((itemCard) => list.appendChild(itemCard));
-      }
-    } catch { /* Keep the current shelf responsive and retry when it is scrolled again. */ }
-    finally { loading = false; }
+  let page = 1, hasMore = firstPage.hasMore, loadingPage: Promise<void> | null = null;
+  const appendNextPage = (): Promise<void> => {
+    if (!loadPage || !hasMore) return Promise.resolve();
+    if (loadingPage) return loadingPage;
+    loadingPage = (async () => {
+      try {
+        const next = await loadPage(page + 1);
+        if (!next.items.length) hasMore = false;
+        else {
+          page += 1; hasMore = next.hasMore;
+          const cards = next.items.map((item) => card(item));
+          cards.forEach((itemCard) => list.appendChild(itemCard));
+        }
+      } catch { /* Keep the current shelf responsive and retry when it is scrolled again. */ }
+      finally { loadingPage = null; }
+    })();
+    return loadingPage;
   };
+  shelfPageLoaders.set(list, appendNextPage);
+  list.addEventListener('focusin', (event) => {
+    const focused = (event.target as HTMLElement | null)?.closest<HTMLButtonElement>('.central-card[data-card-key]');
+    if (!focused || !hasMore) return;
+    const cards = list.querySelectorAll('.central-card[data-card-key]');
+    const index = Array.prototype.indexOf.call(cards, focused) as number;
+    if (cards.length - index <= 4) void appendNextPage();
+  });
   list.addEventListener('scroll', () => {
-    if (!loadPage || !hasMore || loading || list.scrollWidth <= list.clientWidth) return;
+    if (!loadPage || !hasMore || loadingPage || list.scrollWidth <= list.clientWidth) return;
     if (list.scrollLeft + list.clientWidth < list.scrollWidth - Math.max(320, list.clientWidth * .35)) return;
     void appendNextPage();
   }, { passive: true });
@@ -2153,6 +2252,7 @@ function resetWebosHomeBackSequence(): void {
 function closeWebosExitPrompt(): void {
   webosExitPrompt?.remove();
   webosExitPrompt = null;
+  document.removeEventListener('focusin', trapWebosExitPromptFocus, true);
   resetWebosHomeBackSequence();
   document.querySelector<HTMLButtonElement>('#central-nav [data-view="home"]')?.focus();
 }
@@ -2169,13 +2269,16 @@ function openWebosExitPrompt(): void {
   stay.type = 'button'; exit.type = 'button';
   stay.onclick = closeWebosExitPrompt;
   exit.onclick = () => window.close();
-  backdrop.addEventListener('keydown', (event) => {
-    if (event.keyCode !== 37 && event.keyCode !== 39) return;
-    event.preventDefault();
-    (document.activeElement === stay ? exit : stay).focus();
-  });
   actions.append(stay, exit); dialog.append(heading, message, actions); backdrop.appendChild(dialog);
   document.body.appendChild(backdrop); webosExitPrompt = backdrop; stay.focus();
+  document.addEventListener('focusin', trapWebosExitPromptFocus, true);
+}
+function trapWebosExitPromptFocus(event: FocusEvent): void {
+  if (!webosExitPrompt) return;
+  const stay = webosExitPrompt.querySelector<HTMLButtonElement>('.webos-exit-stay');
+  const exit = webosExitPrompt.querySelector<HTMLButtonElement>('.webos-exit-confirm');
+  if (!stay || !exit || event.target === stay || event.target === exit) return;
+  stay.focus();
 }
 function handleWebosHomeBackPress(): boolean {
   if (!document.body.classList.contains('webos-client') || view !== 'home'
@@ -2199,6 +2302,17 @@ document.addEventListener('keydown', (event) => {
   let active = document.activeElement as HTMLElement | null;
   const key = event.keyCode;
   const isBack = [461, 10009, 8, 27].includes(key) || ['Escape', 'BrowserBack'].includes(event.key);
+  if (webosExitPrompt) {
+    event.preventDefault(); event.stopImmediatePropagation();
+    const stay = webosExitPrompt.querySelector<HTMLButtonElement>('.webos-exit-stay');
+    const exit = webosExitPrompt.querySelector<HTMLButtonElement>('.webos-exit-confirm');
+    if (!stay || !exit) return;
+    if (isBack) { closeWebosExitPrompt(); return; }
+    if (!webosExitPrompt.contains(document.activeElement)) stay.focus();
+    else if (key === 37 || key === 39) (document.activeElement === stay ? exit : stay).focus();
+    else if (key === 13 || key === 23 || key === 32) (document.activeElement === exit ? exit : stay).click();
+    return;
+  }
   if ((active?.tagName === 'INPUT' || active?.tagName === 'TEXTAREA') && key === 8) return;
   const seekInputActive = active?.id === 'central-player-track';
   if ((active?.tagName === 'INPUT' || active?.tagName === 'TEXTAREA') && !isBack && !seekInputActive) return;
@@ -2216,6 +2330,42 @@ document.addEventListener('keydown', (event) => {
   }
   if (key === 23 && active?.tagName === 'BUTTON') { event.preventDefault(); active.click(); return; }
   const playerOpen = !player.classList.contains('hidden');
+  if (!playerOpen && document.body.classList.contains('webos-client') && (key === 37 || key === 39)) {
+    const liveGrid = active?.closest<HTMLElement>('.central-live-grid');
+    const channelCard = active?.closest<HTMLButtonElement>('.central-live-grid .central-card[data-card-key]');
+    if (liveGrid && channelCard) {
+      const cards = Array.from(liveGrid.querySelectorAll<HTMLButtonElement>('.central-card[data-card-key]'));
+      const index = cards.indexOf(channelCard);
+      const columnCount = 6;
+      const nextIndex = index + (key === 39 ? 1 : -1);
+      const next = cards[nextIndex];
+      const staysInSameRow = next && Math.floor(index / columnCount) === Math.floor(nextIndex / columnCount);
+      event.preventDefault(); event.stopPropagation();
+      if (next && staysInSameRow) focusShelfItem(liveGrid, next);
+      return;
+    }
+  }
+  if (!playerOpen && document.body.classList.contains('webos-client') && (key === 37 || key === 39)) {
+    const list = active?.closest<HTMLElement>('.central-cards');
+    const focusedCard = active?.closest<HTMLButtonElement>('.central-card[data-card-key]');
+    if (list && focusedCard) {
+      const cards = Array.from(list.querySelectorAll<HTMLButtonElement>('.central-card[data-card-key]'));
+      const index = cards.indexOf(focusedCard);
+      const next = cards[index + (key === 39 ? 1 : -1)];
+      event.preventDefault(); event.stopPropagation();
+      if (next) {
+        focusShelfItem(list, next);
+        if (key === 39 && cards.length - index <= 4) void shelfPageLoaders.get(list)?.();
+      } else if (key === 39) {
+        const loadNext = shelfPageLoaders.get(list);
+        if (loadNext) void loadNext().then(() => {
+          const firstNewCard = list.querySelectorAll<HTMLButtonElement>('.central-card[data-card-key]')[index + 1];
+          if (firstNewCard) focusShelfItem(list, firstNewCard);
+        });
+      } else if (list.scrollLeft > 0) list.scrollLeft = 0;
+      return;
+    }
+  }
   if (playerOpen) {
     const controlsWereHidden = player.classList.contains('controls-hidden');
     revealPlayerControls();
