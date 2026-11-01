@@ -1987,7 +1987,8 @@ async function play(item: Item, liveFormat: 'm3u8' | 'ts' = 'm3u8', resumeAt?: n
     player.classList.remove('hidden');
     revealPlayerControls();
     let sourceUrl: string;
-    const requiresRemux = !config?.xtream && playableItem.kind !== 'live' && ['mkv', 'avi', 'wmv', 'flv', 'mov', 'ts', 'mpeg', 'mpg'].includes((playableItem.streams?.find((stream) => stream.id === (playableItem.streamId ?? playableItem.id))?.extension ?? (playableItem as Item & { streamExtension?: string }).streamExtension ?? '').toLowerCase().replace(/^\./, ''));
+    const isWebOsClient = document.body.classList.contains('webos-client');
+    const requiresRemux = !config?.xtream && !isWebOsClient && playableItem.kind !== 'live' && ['mkv', 'avi', 'wmv', 'flv', 'mov', 'ts', 'mpeg', 'mpg'].includes((playableItem.streams?.find((stream) => stream.id === (playableItem.streamId ?? playableItem.id))?.extension ?? (playableItem as Item & { streamExtension?: string }).streamExtension ?? '').toLowerCase().replace(/^\./, ''));
     activeRemuxMode = requiresRemux ? (forceVideoTranscode ? 'transcode' : 'copy') : null;
     remuxTranscodeAttempted = forceVideoTranscode;
     if (sourceOverride) sourceUrl = sourceOverride;
