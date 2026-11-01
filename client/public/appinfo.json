@@ -1,6 +1,6 @@
 {
   "id": "com.nightowly.iptv",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "vendor": "NightOwly",
   "type": "web",
   "main": "index.html",
