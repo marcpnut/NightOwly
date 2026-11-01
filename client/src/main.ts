@@ -81,6 +81,7 @@ type View = 'home' | 'whats-new' | 'movies' | 'series' | 'live' | 'my-list' | 's
 const el = <T extends HTMLElement = HTMLElement>(id: string): T => document.getElementById(id) as T;
 const centralFullscreenButton = el<HTMLButtonElement>('central-fullscreen');
 if (document.body.classList.contains('webos-client')) centralFullscreenButton.parentNode?.removeChild(centralFullscreenButton);
+else document.body.classList.add('browser-client');
 const setup = el('central-setup');
 const app = el('central-app');
 const content = el('central-content');
@@ -99,18 +100,16 @@ function makeScrollIndicatorUnselectable(button: HTMLButtonElement): void {
 }
 makeScrollIndicatorUnselectable(pageUpButton);
 makeScrollIndicatorUnselectable(pageDownButton);
-if (document.body.classList.contains('webos-client')) {
-  // Chromium 53 can leave the old remote focus ring visible after pointer
-  // hover. Transfer DOM focus on the delegated mouse event so only the tile
-  // under the pointer owns the focus styling.
-  content.addEventListener('mouseover', (event) => {
-    const target = (event.target as Element | null)?.closest<HTMLButtonElement>('.central-card');
-    if (!target || !content.contains(target) || document.activeElement === target) return;
-    const previous = document.activeElement as HTMLElement | null;
-    if (previous && content.contains(previous) && previous.matches('.central-card')) previous.blur();
-    target.focus();
-  });
+const pointerFocusableSelector = 'button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
+function followPointerFocus(target: EventTarget | null): void {
+  const element = target instanceof Element ? target : null;
+  const control = element?.closest<HTMLElement>(pointerFocusableSelector);
+  if (!control || control.matches('.central-page-scroll-controls button,.central-shelf-arrow,.central-series-scroll-controls button')
+    || (!app.contains(control) && !player.contains(control)) || control.closest('.hidden')) return;
+  if (document.activeElement !== control) control.focus();
 }
+document.addEventListener('pointermove', (event) => { if (event.pointerType === 'mouse' || event.pointerType === 'pen') followPointerFocus(event.target); }, { passive: true });
+document.addEventListener('mouseover', (event) => followPointerFocus(event.target), { passive: true });
 function renderProfileButton(): void {
   profileButton.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 21a8 8 0 0 0-16 0M12 13a5 5 0 1 0 0-10 5 5 0 0 0 0 10Z"/></svg>';
 }
@@ -140,6 +139,7 @@ let preferHearingImpairedSubtitles = localStorage.getItem('nightowly.subtitle-he
 let view: View = 'home';
 let previousView: View = 'home';
 let lastFocus: HTMLElement | null = null;
+let playerReturnFocus: HTMLElement | null = null;
 let restoreCardKey = '';
 let currentItem: Item | null = null;
 let playingItem: Item | null = null;
@@ -191,6 +191,8 @@ let activeLiveFormat: 'm3u8' | 'ts' = 'm3u8';
 let activeRemuxMode: 'copy' | 'transcode' | null = null;
 let remuxTranscodeAttempted = false;
 let playerControlsTimer = 0;
+let browserPlaybackIndicatorTimer = 0;
+let browserSeekSelected = false;
 const watched = new Map<string, number>();
 const favorites = new Set<string>();
 const catalogApiCache = new Map<string, { value: unknown; expiresAt: number }>();
@@ -209,20 +211,76 @@ function playbackClock(seconds: number): string {
   const secondText = `0${rest}`.slice(-2);
   return hours ? `${hours}:${`0${minutes}`.slice(-2)}:${secondText}` : `${minutes}:${secondText}`;
 }
+function playerLanguageCode(value?: string): string {
+  const key = (value || '').trim().toLowerCase().replace(/[_-].*$/, '');
+  if (!key || key === 'und' || key === 'unlabelled' || key === 'unknown') return '--';
+  const codes: Record<string, string> = { english: 'EN', eng: 'EN', en: 'EN', dutch: 'NL', nederlands: 'NL', dut: 'NL', nld: 'NL', nl: 'NL',
+    polish: 'PL', pol: 'PL', pl: 'PL', german: 'DE', deu: 'DE', ger: 'DE', de: 'DE', french: 'FR', fra: 'FR', fre: 'FR', fr: 'FR',
+    spanish: 'ES', spa: 'ES', es: 'ES', italian: 'IT', ita: 'IT', it: 'IT', portuguese: 'PT', por: 'PT', pt: 'PT', turkish: 'TR', tur: 'TR', tr: 'TR',
+    russian: 'RU', rus: 'RU', ru: 'RU', ukrainian: 'UK', ukr: 'UK', uk: 'UK', arabic: 'AR', ara: 'AR', ar: 'AR' };
+  return codes[key] || (/^[a-z]{2}$/i.test(key) ? key.toUpperCase() : /^[a-z]{3}$/i.test(key) ? key.slice(0, 2).toUpperCase() : '--');
+}
+function syncBrowserPlayerDetails(): void {
+  if (!document.body.classList.contains('browser-client')) return;
+  const item = playingItem;
+  const title = el('central-browser-player-title');
+  const subline = el('central-browser-player-subtitle-line');
+  const languageBadge = el('central-browser-player-language');
+  const status = el('central-browser-player-status');
+  const resolution = el('central-browser-player-resolution');
+  const subtitleTrack = el('central-browser-player-subtitle-track');
+  const playButton = el<HTMLButtonElement>('central-browser-player-play');
+  const favorite = el<HTMLButtonElement>('central-browser-player-favorite');
+  if (!item) { title.textContent = ''; subline.textContent = ''; languageBadge.textContent = '--'; status.textContent = 'PAUSED'; resolution.textContent = ''; subtitleTrack.textContent = ''; return; }
+  const seriesName = item.kind === 'episode' ? item.seriesTitle || (currentItem?.kind === 'series' && currentItem.id === item.seriesId ? currentItem.title : '') : '';
+  const episodeNumber = item.kind === 'episode' && item.seasonNumber !== undefined && item.episodeNumber !== undefined
+    ? `S${String(item.seasonNumber).padStart(2, '0')} E${String(item.episodeNumber).padStart(2, '0')}` : '';
+  title.textContent = item.kind === 'episode' && seriesName ? `${episodeNumber ? `${episodeNumber} | ` : ''}${normalizeDisplayTitle(seriesName)}` : normalizeDisplayTitle(item.title);
+  subline.textContent = item.kind === 'episode' ? normalizeDisplayTitle(item.title) : normalizeDisplayTitle(item.title);
+  const stream = item.streams?.find((entry) => (entry.providerId || entry.id) === (item.streamId || item.id));
+  const titleLanguage = item.title.match(/^\s*([A-Z]{2,3})\s*[|:]/i)?.[1];
+  languageBadge.textContent = playerLanguageCode(stream?.languageCode || stream?.language || item.metadata?.language || titleLanguage);
+  status.textContent = playerStatus.textContent?.trim() || (video.paused ? 'PAUSED' : 'PLAYING');
+  resolution.textContent = video.videoWidth && video.videoHeight ? `${video.videoWidth} × ${video.videoHeight}` : '';
+  let activeSubtitle = 0;
+  let activeSubtitleCode = '';
+  for (let index = 0; index < video.textTracks.length; index++) if (video.textTracks[index].mode === 'showing') {
+    activeSubtitle = index + 1; activeSubtitleCode = playerLanguageCode(video.textTracks[index].language || video.textTracks[index].label); break;
+  }
+  subtitleTrack.textContent = activeSubtitle ? `SUB ${activeSubtitleCode === '--' ? activeSubtitle : activeSubtitleCode}` : '';
+  const targetKind = item.kind === 'episode' ? 'series' : item.kind;
+  const targetId = item.kind === 'episode' ? item.seriesId || '' : item.id;
+  favorite.setAttribute('aria-pressed', String(Boolean(targetId && favorites.has(`${targetKind}:${targetId}`))));
+  favorite.setAttribute('aria-label', favorite.getAttribute('aria-pressed') === 'true' ? 'Remove from My List' : 'Add to My List');
+  favorite.title = favorite.getAttribute('aria-label') || '';
+  const paused = video.paused;
+  playButton.setAttribute('aria-label', paused ? 'Play' : 'Pause'); playButton.title = paused ? 'Play' : 'Pause';
+  playButton.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${paused ? '<path d="m8 5 12 7-12 7z"/>' : '<path d="M8 5h3v14H8zm6 0h3v14h-3z"/>'}</svg>`;
+  el<HTMLButtonElement>('central-browser-player-restart').classList.toggle('hidden', item.kind === 'live');
+}
 function updatePlaybackProgress(): void {
   el('central-player-time').textContent = playbackClock(video.currentTime);
   el('central-player-duration').textContent = playbackClock(video.duration);
+  if (document.body.classList.contains('browser-client')) {
+    el('central-browser-player-time').textContent = playbackClock(video.currentTime);
+    el('central-browser-player-duration').textContent = playbackClock(video.duration);
+  }
   const percent = Number.isFinite(video.duration) && video.duration > 0
     ? Math.max(0, Math.min(100, video.currentTime / video.duration * 100)) : 0;
-  const seekbar = el<HTMLInputElement>('central-player-track');
-  seekbar.style.setProperty('--progress-percent', `${percent}%`);
-  seekbar.value = `${Math.round(percent * Number(seekbar.max) / 100)}`;
-  seekbar.setAttribute('aria-valuenow', seekbar.value);
-  seekbar.setAttribute('aria-valuetext', `${playbackClock(video.currentTime)} of ${playbackClock(video.duration)}`);
+  const seekbars = document.body.classList.contains('browser-client') ? ['central-player-track', 'central-browser-player-track'] : ['central-player-track'];
+  seekbars.forEach((id) => {
+    const seekbar = el<HTMLInputElement>(id);
+    seekbar.style.setProperty('--progress-percent', `${percent}%`);
+    seekbar.value = `${Math.round(percent * Number(seekbar.max) / 100)}`;
+    seekbar.setAttribute('aria-valuenow', seekbar.value);
+    seekbar.setAttribute('aria-valuetext', `${playbackClock(video.currentTime)} of ${playbackClock(video.duration)}`);
+  });
+  syncBrowserPlayerDetails();
 }
 function revealPlayerControls(): void {
   window.clearTimeout(playerControlsTimer);
   player.classList.remove('controls-hidden');
+  syncBrowserPlayerDetails();
   if (player.classList.contains('hidden') || video.paused || !el('central-player-stream-menu').classList.contains('hidden')) return;
   playerControlsTimer = window.setTimeout(() => {
     playerControlsTimer = 0;
@@ -1456,7 +1514,7 @@ async function showMyList(): Promise<void> {
     ]);
     if (view !== 'my-list') return;
     clear(content); content.appendChild(node('div', 'central-page-kicker', 'YOUR SPACE'));
-    content.appendChild(node('h1', 'central-page-title', 'My Cinema'));
+    content.appendChild(node('h1', 'central-page-title', `My Cinema - ${profile.name}`));
     const continueItems = home.rows.find((group) => group.id === 'continue')?.items || [];
     if (continueItems.length) content.appendChild(row('Continue Watching', continueItems));
     if (result.items.length) content.appendChild(row('My List', result.items));
@@ -1874,6 +1932,11 @@ function playFollowingEpisodeNow(): void {
   })();
 }
 async function play(item: Item, liveFormat: 'm3u8' | 'ts' = 'm3u8', resumeAt?: number, sourceOverride?: string, forceVideoTranscode = false): Promise<void> {
+  const openingPlayer = player.classList.contains('hidden');
+  if (openingPlayer) {
+    const active = document.activeElement;
+    playerReturnFocus = active instanceof HTMLElement && active !== document.body && !player.contains(active) ? active : lastFocus?.isConnected ? lastFocus : null;
+  }
   try {
     let playableItem = item;
     // Featured and shelf cards only carry compact catalog metadata. Hydrate the
@@ -1909,7 +1972,12 @@ async function play(item: Item, liveFormat: 'm3u8' | 'ts' = 'm3u8', resumeAt?: n
     updatePlayerOptionVisibility();
     clearExternalSubtitle();
     playerStatus.textContent = 'Resolving stream…';
-    el('central-playing-title').textContent = normalizeDisplayTitle(playableItem.title);
+    const playingSeriesName = playableItem.kind === 'episode' ? playableItem.seriesTitle || '' : '';
+    const playingEpisodeNumber = playableItem.kind === 'episode' && playableItem.seasonNumber !== undefined && playableItem.episodeNumber !== undefined
+      ? `S${String(playableItem.seasonNumber).padStart(2, '0')} E${String(playableItem.episodeNumber).padStart(2, '0')}` : '';
+    el('central-playing-title').textContent = playableItem.kind === 'episode' && playingSeriesName
+      ? `${playingEpisodeNumber ? `${playingEpisodeNumber} | ` : ''}${normalizeDisplayTitle(playingSeriesName)} — ${normalizeDisplayTitle(playableItem.title)}`
+      : normalizeDisplayTitle(playableItem.title);
     player.classList.remove('hidden');
     revealPlayerControls();
     let sourceUrl: string;
@@ -1938,7 +2006,7 @@ async function play(item: Item, liveFormat: 'm3u8' | 'ts' = 'm3u8', resumeAt?: n
     };
     await video.play();
     revealPlayerControls();
-    el<HTMLButtonElement>('central-play-pause').focus();
+    (document.body.classList.contains('browser-client') ? el<HTMLButtonElement>('central-browser-player-play') : el<HTMLButtonElement>('central-play-pause')).focus();
   } catch (error) {
     if (item.kind === 'live' && liveFormat === 'm3u8' && errorMessage(error).includes('HTTP 422')) { await play(item, 'ts'); return; }
     playerStatus.textContent = errorMessage(error); revealPlayerControls();
@@ -1949,8 +2017,27 @@ async function saveProgress(completed = false): Promise<void> {
   const positionSeconds = Number.isFinite(video.currentTime) ? Math.max(0, Math.floor(video.currentTime)) : 0;
   const durationSeconds = Number.isFinite(video.duration) ? Math.floor(video.duration) : undefined;
   watched.set(`${playingItem.kind}:${playingItem.id}`, positionSeconds);
-  try { await api(`/profiles/${profile.id}/progress`, { kind: playingItem.kind, id: playingItem.id, positionSeconds, durationSeconds, completed }); invalidateHomeCache(); }
+  try { await api(`/profiles/${profile.id}/progress`, { kind: playingItem.kind, id: playingItem.id, positionSeconds, durationSeconds, completed,
+    ...(playingItem.kind === 'episode' ? { seriesId: playingItem.seriesId, seriesTitle: playingItem.seriesTitle, title: playingItem.title,
+      seasonNumber: playingItem.seasonNumber, episodeNumber: playingItem.episodeNumber, posterUrl: playingItem.posterUrl, backdropUrl: playingItem.backdropUrl } : {}) }); invalidateHomeCache(); }
   catch { /* Playback continues if progress cannot be saved. */ }
+}
+async function togglePlayingItemFavorite(): Promise<void> {
+  if (!profile || !playingItem || playingItem.kind === 'live') return;
+  const target = playingItem.kind === 'episode'
+    ? { kind: 'series' as const, id: playingItem.seriesId || '' }
+    : { kind: playingItem.kind, id: playingItem.id };
+  if (!target.id) { playerStatus.textContent = 'Could not identify the series for this episode.'; revealPlayerControls(); return; }
+  const key = `${target.kind}:${target.id}`;
+  const saved = favorites.has(key);
+  try {
+    await api(`/profiles/${profile.id}/my-list`, { kind: target.kind, id: target.id, saved: !saved });
+    if (saved) favorites.delete(key); else favorites.add(key);
+    invalidateHomeCache();
+    syncBrowserPlayerDetails();
+    playerStatus.textContent = saved ? 'Removed from My List' : 'Added to My List';
+    revealPlayerControls();
+  } catch (error) { playerStatus.textContent = errorMessage(error); revealPlayerControls(); }
 }
 function closePlayer(save = true): void {
   if (player.classList.contains('hidden')) return;
@@ -1966,7 +2053,11 @@ function closePlayer(save = true): void {
     const preview = content.querySelector<HTMLElement>('.central-live-preview');
     if (preview) { video.classList.add('central-inline-video'); video.classList.remove('central-inline-playing'); preview.appendChild(video); livePreviewLoader?.(liveItemToPreview); }
   }
-  lastFocus?.focus();
+  const returnFocus = playerReturnFocus;
+  playerReturnFocus = null;
+  if (returnFocus?.isConnected) returnFocus.focus();
+  else lastFocus?.focus();
+  syncBrowserPlayerDetails();
 }
 function showProfiles(): void {
   const panel = node('section', 'central-profile-picker');
@@ -2395,12 +2486,54 @@ document.querySelectorAll<HTMLButtonElement>('#central-app [data-view]').forEach
 profileButton.onclick = () => navigate('profiles');
 el<HTMLButtonElement>('central-player-back').onclick = () => closePlayer();
 el<HTMLButtonElement>('central-play-pause').onclick = () => { if (video.paused) void video.play(); else video.pause(); };
+el<HTMLButtonElement>('central-browser-player-back').onclick = () => closePlayer();
+el<HTMLButtonElement>('central-browser-player-favorite').onclick = () => { void togglePlayingItemFavorite(); };
+el<HTMLButtonElement>('central-browser-player-audio').onclick = showStreamLanguageMenu;
+el<HTMLButtonElement>('central-browser-player-subtitles').onclick = showSubtitleMenu;
+el<HTMLButtonElement>('central-browser-player-fullscreen').onclick = () => centralFullscreenButton.click();
+el<HTMLButtonElement>('central-browser-player-restart').onclick = () => { seekTo(0); revealPlayerControls(); };
+el<HTMLButtonElement>('central-browser-player-play').onclick = () => { if (video.paused) void video.play(); else video.pause(); revealPlayerControls(); };
+el<HTMLButtonElement>('central-browser-player-rewind').onclick = () => { seekBy(-10); revealPlayerControls(); };
+el<HTMLButtonElement>('central-browser-player-forward').onclick = () => { seekBy(10); revealPlayerControls(); };
+const browserSeekTrack = el<HTMLInputElement>('central-browser-player-track');
+const browserTimeline = browserSeekTrack.closest<HTMLElement>('.central-browser-player-timeline')!;
+function setBrowserSeekSelected(selected: boolean): void {
+  browserSeekSelected = selected;
+  browserTimeline.classList.toggle('seek-selected', selected);
+}
+browserSeekTrack.addEventListener('pointerdown', () => setBrowserSeekSelected(true));
+browserSeekTrack.addEventListener('input', () => {
+  if (!Number.isFinite(video.duration) || video.duration <= 0) return;
+  setBrowserSeekSelected(true);
+  seekTo((Number(browserSeekTrack.value) / Number(browserSeekTrack.max)) * video.duration);
+  revealPlayerControls();
+});
+browserSeekTrack.addEventListener('keydown', (event) => {
+  const key = event.key;
+  if (key === 'Enter' || key === ' ' || event.keyCode === 23) {
+    event.preventDefault(); event.stopPropagation(); setBrowserSeekSelected(!browserSeekSelected); return;
+  }
+  if (key === 'ArrowLeft' || key === 'ArrowRight') {
+    event.preventDefault(); event.stopPropagation();
+    if (!browserSeekSelected) (key === 'ArrowLeft' ? el<HTMLButtonElement>('central-browser-player-rewind') : el<HTMLButtonElement>('central-browser-player-forward')).focus();
+    else seekBy(key === 'ArrowLeft' ? -10 : 10);
+  }
+});
+function showBrowserPlaybackIndicator(paused: boolean): void {
+  if (!document.body.classList.contains('browser-client')) return;
+  const indicator = el('central-browser-player-state');
+  window.clearTimeout(browserPlaybackIndicatorTimer);
+  if (!paused) { indicator.classList.remove('visible'); indicator.innerHTML = ''; return; }
+  indicator.innerHTML = '<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M10 6h5v20h-5zm7 0h5v20h-5z"/></svg>';
+  indicator.classList.add('visible');
+  browserPlaybackIndicatorTimer = window.setTimeout(() => indicator.classList.remove('visible'), 900);
+}
 el<HTMLButtonElement>('central-next-episode-play').onclick = playFollowingEpisodeNow;
 el<HTMLButtonElement>('central-next-episode-cancel').onclick = () => {
   episodeAutoplayDismissed = true;
   hideNextEpisodePrompt();
   revealPlayerControls();
-  el<HTMLButtonElement>('central-play-pause').focus();
+  (document.body.classList.contains('browser-client') ? el<HTMLButtonElement>('central-browser-player-play') : el<HTMLButtonElement>('central-play-pause')).focus();
 };
 el<HTMLButtonElement>('central-rewind').onclick = () => { seekBy(-10); revealPlayerControls(); };
 el<HTMLButtonElement>('central-forward').onclick = () => { seekBy(10); revealPlayerControls(); };
@@ -2680,8 +2813,8 @@ function handleWebosHomeBackPress(): boolean {
   webosHomeBackResetTimer = window.setTimeout(resetWebosHomeBackSequence, 3500);
   return true;
 }
-video.onpause = () => { setPlayPauseIcon(true); revealPlayerControls(); };
-video.onplay = () => { setPlayPauseIcon(false); revealPlayerControls(); };
+video.onpause = () => { setPlayPauseIcon(true); showBrowserPlaybackIndicator(true); syncBrowserPlayerDetails(); revealPlayerControls(); };
+video.onplay = () => { setPlayPauseIcon(false); showBrowserPlaybackIndicator(false); syncBrowserPlayerDetails(); revealPlayerControls(); };
 player.addEventListener('pointermove', () => { if (!player.classList.contains('hidden')) revealPlayerControls(); });
 
 document.addEventListener('keydown', (event) => {
@@ -2769,7 +2902,7 @@ document.addEventListener('keydown', (event) => {
     const controlsWereHidden = player.classList.contains('controls-hidden');
     revealPlayerControls();
     if (controlsWereHidden && [37, 38, 39, 40].includes(key)) {
-      el<HTMLButtonElement>('central-play-pause').focus();
+      (document.body.classList.contains('browser-client') ? el<HTMLButtonElement>('central-browser-player-play') : el<HTMLButtonElement>('central-play-pause')).focus();
       active = document.activeElement as HTMLElement | null;
     }
     if (key === 415 || key === 19) { event.preventDefault(); if (video.paused) void video.play(); else video.pause(); }
@@ -2777,6 +2910,16 @@ document.addEventListener('keydown', (event) => {
     if (key === 417 || ['MediaFastForward', 'FastForward'].includes(event.key) || event.code === 'MediaFastForward') { event.preventDefault(); seekBy(10); return; }
     if ([37, 38, 39, 40].includes(key)) {
       const menuOpen = !el('central-player-stream-menu').classList.contains('hidden');
+      if (!menuOpen && document.body.classList.contains('browser-client')) {
+        const browserPlay = el<HTMLButtonElement>('central-browser-player-play');
+        const browserRewind = el<HTMLButtonElement>('central-browser-player-rewind');
+        const browserForward = el<HTMLButtonElement>('central-browser-player-forward');
+        if (active?.id === browserPlay.id && key === 39) { event.preventDefault(); event.stopPropagation(); browserRewind.focus(); return; }
+        if (active?.id === browserRewind.id && key === 37) { event.preventDefault(); event.stopPropagation(); browserPlay.focus(); return; }
+        if (active?.id === browserRewind.id && key === 39) { event.preventDefault(); event.stopPropagation(); browserSeekTrack.focus(); return; }
+        if (active?.id === browserForward.id && key === 37) { event.preventDefault(); event.stopPropagation(); browserSeekTrack.focus(); return; }
+        if (active?.id === browserSeekTrack.id && key === 40) { event.preventDefault(); event.stopPropagation(); browserPlay.focus(); return; }
+      }
       if (!menuOpen && active?.id === 'central-player-track' && (key === 37 || key === 39)) {
         event.preventDefault(); event.stopPropagation(); seekBy(key === 37 ? -10 : 10); return;
       }

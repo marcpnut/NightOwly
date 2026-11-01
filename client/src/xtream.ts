@@ -243,8 +243,8 @@ export async function xtreamApi(path: string, body?: unknown): Promise<unknown> 
     return { success: true };
   }
   if (route === '/profiles') {
-    if (body) { profileId = 'local'; return { id: profileId, name: text(json.name) || 'My Profile' }; }
-    return { items: [{ id: profileId, name: 'My Profile' }] };
+    if (body) { profileId = 'local'; return { id: profileId, name: text(json.name) || credentials?.username || 'My Profile' }; }
+    return { items: localProfiles() };
   }
   if (parts[0] === 'profiles') {
     if (parts.length === 1 && !body) return { items: localProfiles() };
@@ -316,6 +316,15 @@ export async function xtreamApi(path: string, body?: unknown): Promise<unknown> 
     for (const entry of progress.slice(0, 20)) {
       const cached = all.find((item) => item.kind === entry.kind && item.id === entry.id);
       if (cached) continueItems.push({ ...cached, positionSeconds: number(entry.positionSeconds) });
+      else if (entry.kind === 'episode' && text(entry.seriesId)) {
+        try {
+          const show = await detailItem('series', text(entry.seriesId));
+          continueItems.push({ ...entry, kind: 'episode', title: text(entry.title) || 'Episode',
+            seriesId: text(entry.seriesId), seriesTitle: text(entry.seriesTitle) || show.title,
+            posterUrl: text(entry.posterUrl) || show.posterUrl, backdropUrl: text(entry.backdropUrl) || show.backdropUrl,
+            positionSeconds: number(entry.positionSeconds) } as AppItem);
+        } catch { /* Skip progress for a show removed by the provider. */ }
+      }
       else { try { continueItems.push({ ...await detailItem(text(entry.kind), text(entry.id)), positionSeconds: number(entry.positionSeconds) }); } catch { /* Removed provider item. */ } }
     }
     const saved = localRows(`${profileId}.my-list`);
@@ -373,7 +382,7 @@ function localProfiles(): Array<{ id: string; name: string }> {
     const parsed = JSON.parse(getStorage('nightowly.profiles') || 'null') as unknown;
     if (Array.isArray(parsed) && parsed.length) return parsed as Array<{ id: string; name: string }>;
   } catch { /* Use the local default below. */ }
-  return [{ id: 'local', name: 'My Profile' }];
+  return [{ id: 'local', name: credentials?.username || 'My Profile' }];
 }
 async function detailItem(kind: string, id: string): Promise<AppItem> {
   if (kind === 'movie') {
