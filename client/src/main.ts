@@ -190,6 +190,8 @@ let externalSubtitleBlobUrl = '';
 let activeLiveFormat: 'm3u8' | 'ts' = 'm3u8';
 let activeRemuxMode: 'copy' | 'transcode' | null = null;
 let remuxTranscodeAttempted = false;
+let activeDirectOriginalPlayback = false;
+let pendingRemuxRequest: { item: Item; liveFormat: 'm3u8' | 'ts'; resumeAt?: number } | null = null;
 let playerControlsTimer = 0;
 let browserPlaybackIndicatorTimer = 0;
 let browserSeekSelected = false;
@@ -1937,6 +1939,43 @@ function playFollowingEpisodeNow(): void {
     await play({ ...next, kind: 'episode' });
   })();
 }
+async function fallbackOriginalPlaybackToRemux(item: Item, liveFormat: 'm3u8' | 'ts', resumeAt?: number): Promise<void> {
+  activeDirectOriginalPlayback = false;
+  activeRemuxMode = 'copy';
+  remuxTranscodeAttempted = true;
+  playerStatus.textContent = 'Starting server remux…';
+  try {
+    const ticket = await api<{ url: string }>('/playback/remux-ticket', { kind: item.kind, id: item.streamId ?? item.id });
+    remuxTranscodeAttempted = false;
+    await play(item, liveFormat, resumeAt, `${config!.url}${ticket.url}`);
+  } catch (error) {
+    playerStatus.textContent = errorMessage(error);
+    revealPlayerControls();
+  }
+}
+function closeRemuxPrompt(): void {
+  el('central-remux-prompt').classList.add('hidden');
+  pendingRemuxRequest = null;
+}
+function askToUseRemux(item: Item, liveFormat: 'm3u8' | 'ts', resumeAt?: number): void {
+  if (item.kind !== 'movie' && item.kind !== 'episode') return;
+  if (pendingRemuxRequest) return;
+  pendingRemuxRequest = { item, liveFormat, resumeAt };
+  playerStatus.textContent = 'Provider stream could not be played.';
+  el('central-remux-prompt').classList.remove('hidden');
+  revealPlayerControls();
+  el<HTMLButtonElement>('central-remux-confirm').focus();
+}
+el<HTMLButtonElement>('central-remux-confirm').onclick = () => {
+  const request = pendingRemuxRequest;
+  closeRemuxPrompt();
+  if (request) void fallbackOriginalPlaybackToRemux(request.item, request.liveFormat, request.resumeAt);
+};
+el<HTMLButtonElement>('central-remux-cancel').onclick = () => {
+  closeRemuxPrompt();
+  playerStatus.textContent = 'Provider stream could not be played.';
+  revealPlayerControls();
+};
 async function play(item: Item, liveFormat: 'm3u8' | 'ts' = 'm3u8', resumeAt?: number, sourceOverride?: string, forceVideoTranscode = false): Promise<void> {
   const openingPlayer = player.classList.contains('hidden');
   if (openingPlayer) {
@@ -1987,21 +2026,17 @@ async function play(item: Item, liveFormat: 'm3u8' | 'ts' = 'm3u8', resumeAt?: n
     player.classList.remove('hidden');
     revealPlayerControls();
     let sourceUrl: string;
-    const isWebOsClient = document.body.classList.contains('webos-client');
-    const requiresRemux = !config?.xtream && !isWebOsClient && playableItem.kind !== 'live' && ['mkv', 'avi', 'wmv', 'flv', 'mov', 'ts', 'mpeg', 'mpg'].includes((playableItem.streams?.find((stream) => stream.id === (playableItem.streamId ?? playableItem.id))?.extension ?? (playableItem as Item & { streamExtension?: string }).streamExtension ?? '').toLowerCase().replace(/^\./, ''));
-    activeRemuxMode = requiresRemux ? (forceVideoTranscode ? 'transcode' : 'copy') : null;
+    activeDirectOriginalPlayback = false;
+    activeRemuxMode = sourceOverride ? (forceVideoTranscode ? 'transcode' : 'copy') : null;
     remuxTranscodeAttempted = forceVideoTranscode;
     if (sourceOverride) sourceUrl = sourceOverride;
-    else if (requiresRemux) {
-      const ticket = await api<{ url: string }>('/playback/remux-ticket', { kind: playableItem.kind, id: playableItem.streamId ?? playableItem.id, transcode: forceVideoTranscode });
-      sourceUrl = `${config!.url}${ticket.url}`;
-    }
     else sourceUrl = (await api<{ url: string }>(`/playback/resolve`, { kind: playableItem.kind, id: playableItem.streamId ?? playableItem.id, format: playableItem.kind === 'live' ? liveFormat : undefined })).url;
     const stream = new URL(sourceUrl);
     if (!['http:', 'https:'].includes(stream.protocol)) throw new Error('Unsupported stream URL.');
     lastProgressSave = 0; activeLiveFormat = liveFormat;
     playerStatus.textContent = 'Buffering…';
     video.src = sourceUrl;
+    activeDirectOriginalPlayback = !sourceOverride;
     video.load();
     updatePlaybackProgress();
     const position = resumeAt ?? watched.get(`${playableItem.kind}:${playableItem.id}`) ?? playableItem.positionSeconds ?? 0;
@@ -2016,6 +2051,10 @@ async function play(item: Item, liveFormat: 'm3u8' | 'ts' = 'm3u8', resumeAt?: n
     (document.body.classList.contains('browser-client') ? el<HTMLButtonElement>('central-browser-player-play') : el<HTMLButtonElement>('central-play-pause')).focus();
   } catch (error) {
     if (item.kind === 'live' && liveFormat === 'm3u8' && errorMessage(error).includes('HTTP 422')) { await play(item, 'ts'); return; }
+    if (playingItem && activeDirectOriginalPlayback && (playingItem.kind === 'movie' || playingItem.kind === 'episode')) {
+      askToUseRemux(playingItem, liveFormat, Number.isFinite(video.currentTime) ? Math.floor(video.currentTime) : undefined);
+      return;
+    }
     playerStatus.textContent = errorMessage(error); revealPlayerControls();
   }
 }
@@ -2048,6 +2087,8 @@ async function togglePlayingItemFavorite(): Promise<void> {
 }
 function closePlayer(save = true): void {
   if (player.classList.contains('hidden')) return;
+  activeDirectOriginalPlayback = false;
+  closeRemuxPrompt();
   const liveItemToPreview = playingItem?.kind === 'live' && view === 'live' && content.querySelector('.central-live-preview') ? playingItem : null;
   window.clearTimeout(playerControlsTimer); player.classList.remove('controls-hidden');
   el('central-player-stream-menu').classList.add('hidden');
@@ -2748,6 +2789,10 @@ video.onended = () => {
 };
 video.onerror = () => {
   if (playingItem?.kind === 'live' && activeLiveFormat === 'm3u8') { const item = playingItem; playingItem = null; void play(item, 'ts'); return; }
+  if (playingItem && activeDirectOriginalPlayback && (playingItem.kind === 'movie' || playingItem.kind === 'episode')) {
+    askToUseRemux(playingItem, activeLiveFormat, Number.isFinite(video.currentTime) ? Math.floor(video.currentTime) : undefined);
+    return;
+  }
   if (playingItem && activeRemuxMode === 'copy' && !remuxTranscodeAttempted && (video.error?.code === MediaError.MEDIA_ERR_DECODE || video.error?.code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED)) {
     const item = playingItem; const resumeAt = Number.isFinite(video.currentTime) ? Math.floor(video.currentTime) : undefined;
     remuxTranscodeAttempted = true; playerStatus.textContent = 'Trying compatibility conversion…';
@@ -2840,6 +2885,15 @@ document.addEventListener('keydown', (event) => {
     if (!webosExitPrompt.contains(document.activeElement)) stay.focus();
     else if (key === 37 || key === 39) (document.activeElement === stay ? exit : stay).focus();
     else if (key === 13 || key === 23 || key === 32) (document.activeElement === exit ? exit : stay).click();
+    return;
+  }
+  if (!el('central-remux-prompt').classList.contains('hidden')) {
+    event.preventDefault(); event.stopImmediatePropagation();
+    const confirm = el<HTMLButtonElement>('central-remux-confirm');
+    const cancel = el<HTMLButtonElement>('central-remux-cancel');
+    if (isBack) { cancel.click(); return; }
+    if (key === 37 || key === 39 || key === 38 || key === 40) (document.activeElement === confirm ? cancel : confirm).focus();
+    else if (key === 13 || key === 23 || key === 32) (document.activeElement === cancel ? cancel : confirm).click();
     return;
   }
   if (activeCategoryJumpMenu?.panel.classList.contains('open') && isBack) {
