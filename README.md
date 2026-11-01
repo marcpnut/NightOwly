@@ -20,6 +20,6 @@ pnpm build
 pnpm package:webos
 ```
 
-The browser build is in `client/dist`. The LG webOS IPK is generated under `packages/`; install it with `ares-install --device <device-name> <ipk-file>` after pairing the TV in Developer Mode. Release 1.0.2 carries the latest shared player, focus, and My Cinema fixes while keeping provider data and preferences local to NightOwly.
+The browser build is in `client/dist`. The LG webOS IPK is generated under `packages/`; install it with `ares-install --device <device-name> <ipk-file>` after pairing the TV in Developer Mode. Release 1.0.3 disables the next-episode countdown and auto-advance while remux playback is active.
 
 The client targets Chromium 53 for LG webOS 4.5 and does not depend on the copied development server directory. The app package ID is `com.nightowly.iptv`.

@@ -1894,7 +1894,13 @@ async function advanceToFollowingEpisode(): Promise<void> {
   }
 }
 function updateNextEpisodePrompt(): void {
-  if (playingItem?.kind !== 'episode' || !nextEpisodeItem || episodeAutoplayDismissed || episodeAdvanceStarted
+  if (playingItem?.kind !== 'episode' || activeRemuxMode !== null) {
+    const active = document.activeElement;
+    if (!el('central-next-episode').classList.contains('hidden')) hideNextEpisodePrompt();
+    if (active === el('central-next-episode-play') || active === el('central-next-episode-cancel')) el<HTMLButtonElement>('central-play-pause').focus();
+    return;
+  }
+  if (!nextEpisodeItem || episodeAutoplayDismissed || episodeAdvanceStarted
     || !Number.isFinite(video.duration) || video.duration <= 0) return;
   const remaining = video.duration - video.currentTime;
   if (remaining > NEXT_EPISODE_COUNTDOWN_SECONDS) {
@@ -2733,7 +2739,10 @@ video.ontimeupdate = () => {
 };
 video.textTracks.addEventListener('addtrack', updatePlayerOptionVisibility);
 video.onended = () => {
-  if (playingItem?.kind === 'episode' && !episodeAutoplayDismissed) { void advanceToFollowingEpisode(); return; }
+  if (playingItem?.kind === 'episode') {
+    if (activeRemuxMode !== null) { playerStatus.textContent = 'Remux stream ended.'; revealPlayerControls(); return; }
+    if (!episodeAutoplayDismissed) { void advanceToFollowingEpisode(); return; }
+  }
   void saveProgress(true); closePlayer(false);
 };
 video.onerror = () => {
