@@ -22,10 +22,11 @@ For the CT 190 installation, the API starts through systemd and uses PostgreSQL 
 
 TMDB metadata is fetched on first title or season open. The Settings form stores the read access token encrypted in `sc_tmdb_settings`; no bulk metadata enrichment is performed. TMDB requires its approved logo and attribution notice in the app credits.
 
-The API is HTTP behind Nginx Proxy Manager at `10.42.0.60`; public clients use `https://[redacted]` with its Let's Encrypt certificate and Force SSL. Keep the upstream at `http://10.42.0.86:8080` inside the LAN, and do not expose port 8080 directly through the router.
+The API is HTTP behind Nginx Proxy Manager. Configure the public hostname and TLS certificate in the proxy manager, and keep the upstream private; do not expose the API port directly through the router.
 
 ## TV package
 
 Run `pnpm install`, `pnpm build`, then `pnpm package:webos` in the project folder. The client package ID is `com.streamcinema.iptv`; installing it will not replace the existing app. Before a development install, confirm the Nano's currently installed packages, save its relevant app data, and verify the webOS package manager and a working removal/rollback path. Do not deploy to the C9 until its connection details and deployment authorization are available.
 
 On first launch, create a NightOwl account. Add the Xtream provider details under Settings → Xtream provider. The client creates a per-TV identifier and a Default profile, then stores only the session token in browser storage. Test Home, category pages, details, episodes, live, playback, subtitles, audio, Back, and progress on the Nano before considering the C9. If any stream fails, inspect its format and TV codec support without modifying the Netflix installation.
+
