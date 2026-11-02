@@ -17,7 +17,7 @@ const pageQuery = z.object({ page: z.coerce.number().int().min(1).default(1), li
 const idParam = z.object({ id: z.string().regex(/^\d+$/) });
 const profileParam = z.object({ id: z.string().uuid() });
 const profileName = z.object({ name: z.string().trim().min(1).max(24) });
-const listInput = z.object({ kind: z.enum(['movie', 'series']), id: z.string().regex(/^\d+$/), saved: z.boolean() });
+const listInput = z.object({ kind: z.enum(['movie', 'series', 'live']), id: z.string().regex(/^\d+$/), saved: z.boolean() });
 const progressInput = z.object({ kind: z.enum(['movie', 'episode', 'live']), id: z.string().regex(/^\d+$/), positionSeconds: z.number().int().min(0), durationSeconds: z.number().int().min(0).optional(), completed: z.boolean().default(false) });
 const playbackInput = z.object({ kind: z.enum(['live', 'movie', 'episode']), id: z.string().regex(/^\d+$/), format: z.enum(['m3u8', 'ts']).optional() });
 const providerInput = z.object({ baseUrl: z.string().trim().url().max(512), username: z.string().trim().min(1).max(128), password: z.string().min(1).max(256) });
@@ -259,15 +259,15 @@ export function makeApi(options: { apiToken: string; credentialKey: Buffer }) {
             ORDER BY (title_lang.code=$2) DESC,(title_lang.code='en') DESC,title_tx.language_id LIMIT 1),t.original_title)`)} AS title,
           COALESCE(tx.poster_url,t.poster_url) AS "posterUrl",t.backdrop_url AS "backdropUrl",w.position_seconds AS "positionSeconds",w.duration_seconds AS "durationSeconds"
           FROM watch_progress w JOIN sc_provider_streams p ON p.kind=w.kind AND p.provider_id=w.catalog_id AND p.active
-          JOIN sc_titles t ON t.id=p.title_id LEFT JOIN sc_title_translations tx ON tx.title_id=t.id
+          LEFT JOIN sc_titles t ON t.id=p.title_id LEFT JOIN sc_title_translations tx ON tx.title_id=t.id
             AND tx.language_id=(SELECT id FROM sc_languages WHERE code=$2)
           WHERE w.profile_id=$1 AND w.kind IN ('movie','episode') AND NOT w.completed ORDER BY w.updated_at DESC LIMIT 12`, [profile, homeQuery.language]),
-        pool.query(`SELECT m.kind,p.provider_id AS id,${normalizedTitleSql(`COALESCE((SELECT title_tx.display_title FROM sc_title_translations title_tx
+        pool.query(`SELECT m.kind,p.provider_id AS id,CASE WHEN m.kind='live' THEN p.provider_name ELSE ${normalizedTitleSql(`COALESCE((SELECT title_tx.display_title FROM sc_title_translations title_tx
           JOIN sc_languages title_lang ON title_lang.id=title_tx.language_id WHERE title_tx.title_id=t.id AND title_tx.source='tmdb'
-          ORDER BY (title_lang.code=$2) DESC,(title_lang.code='en') DESC,title_tx.language_id LIMIT 1),t.original_title)`)} AS title,
-          COALESCE(tx.poster_url,t.poster_url) AS "posterUrl" FROM my_list m
+          ORDER BY (title_lang.code=$2) DESC,(title_lang.code='en') DESC,title_tx.language_id LIMIT 1),t.original_title)`)} END AS title,
+          COALESCE(p.poster_url,tx.poster_url,t.poster_url) AS "posterUrl" FROM my_list m
           JOIN sc_provider_streams p ON p.kind=m.kind AND p.provider_id=m.catalog_id AND p.active
-          JOIN sc_titles t ON t.id=p.title_id LEFT JOIN sc_title_translations tx ON tx.title_id=t.id
+          LEFT JOIN sc_titles t ON t.id=p.title_id LEFT JOIN sc_title_translations tx ON tx.title_id=t.id
             AND tx.language_id=(SELECT id FROM sc_languages WHERE code=$2)
           WHERE m.profile_id=$1 ORDER BY m.created_at DESC LIMIT 12`, [profile, homeQuery.language])
       ] : [
@@ -462,7 +462,7 @@ export function makeApi(options: { apiToken: string; credentialKey: Buffer }) {
           COALESCE(tx.poster_url,t.poster_url) AS "posterUrl",t.backdrop_url AS "backdropUrl",
           w.position_seconds AS "positionSeconds",w.duration_seconds AS "durationSeconds",w.catalog_id AS "streamId"
         FROM watch_progress w JOIN sc_provider_streams p ON p.kind=w.kind AND p.provider_id=w.catalog_id AND p.active
-        JOIN sc_titles t ON t.id=p.title_id LEFT JOIN sc_title_translations tx ON tx.title_id=t.id AND tx.language_id=(SELECT id FROM sc_languages WHERE code=$2)
+        LEFT JOIN sc_titles t ON t.id=p.title_id LEFT JOIN sc_title_translations tx ON tx.title_id=t.id AND tx.language_id=(SELECT id FROM sc_languages WHERE code=$2)
         WHERE w.profile_id=$1 AND NOT w.completed ORDER BY w.updated_at DESC LIMIT 20`
       : `SELECT w.kind,w.catalog_id AS id,w.catalog_id AS "streamId",w.position_seconds AS "positionSeconds",w.duration_seconds AS "durationSeconds",c.title,c.poster_url AS "posterUrl" FROM watch_progress w JOIN catalog c ON c.kind=w.kind AND c.id=w.catalog_id WHERE w.profile_id=$1 AND NOT w.completed AND c.active ORDER BY w.updated_at DESC LIMIT 20`, normalized ? [id, language] : [id]);
     return { items: rows };
@@ -473,11 +473,11 @@ export function makeApi(options: { apiToken: string; credentialKey: Buffer }) {
     const language = z.object({ language: z.string().regex(/^[a-z]{2}$/).default('en') }).parse(request.query).language;
     const normalized = await hasNormalizedCatalog();
     const { rows } = await pool.query(normalized
-      ? `SELECT m.kind,p.provider_id AS id,${normalizedTitleSql(`COALESCE((SELECT title_tx.display_title FROM sc_title_translations title_tx
+      ? `SELECT m.kind,p.provider_id AS id,p.provider_id AS "streamId",CASE WHEN m.kind='live' THEN p.provider_name ELSE ${normalizedTitleSql(`COALESCE((SELECT title_tx.display_title FROM sc_title_translations title_tx
             JOIN sc_languages title_lang ON title_lang.id=title_tx.language_id WHERE title_tx.title_id=t.id AND title_tx.source='tmdb'
-            ORDER BY (title_lang.code=$2) DESC,(title_lang.code='en') DESC,title_tx.language_id LIMIT 1),t.original_title)`)} AS title,COALESCE(tx.poster_url,t.poster_url) AS "posterUrl"
+            ORDER BY (title_lang.code=$2) DESC,(title_lang.code='en') DESC,title_tx.language_id LIMIT 1),t.original_title)`)} END AS title,COALESCE(p.poster_url,tx.poster_url,t.poster_url) AS "posterUrl"
         FROM my_list m JOIN sc_provider_streams p ON p.kind=m.kind AND p.provider_id=m.catalog_id AND p.active
-        JOIN sc_titles t ON t.id=p.title_id LEFT JOIN sc_title_translations tx ON tx.title_id=t.id AND tx.language_id=(SELECT id FROM sc_languages WHERE code=$2)
+        LEFT JOIN sc_titles t ON t.id=p.title_id LEFT JOIN sc_title_translations tx ON tx.title_id=t.id AND tx.language_id=(SELECT id FROM sc_languages WHERE code=$2)
         WHERE m.profile_id=$1 ORDER BY m.created_at DESC LIMIT 20`
       : `SELECT c.kind,c.id,c.title,c.poster_url AS "posterUrl" FROM my_list m JOIN catalog c ON c.kind=m.kind AND c.id=m.catalog_id WHERE m.profile_id=$1 AND c.active ORDER BY m.created_at DESC LIMIT 20`, normalized ? [id, language] : [id]);
     return { items: rows };
