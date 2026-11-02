@@ -265,7 +265,7 @@ export function makeApi(options: { apiToken: string; credentialKey: Buffer }) {
         pool.query(`SELECT m.kind,p.provider_id AS id,CASE WHEN m.kind='live' THEN p.provider_name ELSE ${normalizedTitleSql(`COALESCE((SELECT title_tx.display_title FROM sc_title_translations title_tx
           JOIN sc_languages title_lang ON title_lang.id=title_tx.language_id WHERE title_tx.title_id=t.id AND title_tx.source='tmdb'
           ORDER BY (title_lang.code=$2) DESC,(title_lang.code='en') DESC,title_tx.language_id LIMIT 1),t.original_title)`)} END AS title,
-          COALESCE(p.poster_url,tx.poster_url,t.poster_url) AS "posterUrl" FROM my_list m
+          COALESCE(tx.poster_url,t.poster_url) AS "posterUrl" FROM my_list m
           JOIN sc_provider_streams p ON p.kind=m.kind AND p.provider_id=m.catalog_id AND p.active
           LEFT JOIN sc_titles t ON t.id=p.title_id LEFT JOIN sc_title_translations tx ON tx.title_id=t.id
             AND tx.language_id=(SELECT id FROM sc_languages WHERE code=$2)
@@ -475,7 +475,7 @@ export function makeApi(options: { apiToken: string; credentialKey: Buffer }) {
     const { rows } = await pool.query(normalized
       ? `SELECT m.kind,p.provider_id AS id,p.provider_id AS "streamId",CASE WHEN m.kind='live' THEN p.provider_name ELSE ${normalizedTitleSql(`COALESCE((SELECT title_tx.display_title FROM sc_title_translations title_tx
             JOIN sc_languages title_lang ON title_lang.id=title_tx.language_id WHERE title_tx.title_id=t.id AND title_tx.source='tmdb'
-            ORDER BY (title_lang.code=$2) DESC,(title_lang.code='en') DESC,title_tx.language_id LIMIT 1),t.original_title)`)} END AS title,COALESCE(p.poster_url,tx.poster_url,t.poster_url) AS "posterUrl"
+            ORDER BY (title_lang.code=$2) DESC,(title_lang.code='en') DESC,title_tx.language_id LIMIT 1),t.original_title)`)} END AS title,COALESCE(tx.poster_url,t.poster_url) AS "posterUrl"
         FROM my_list m JOIN sc_provider_streams p ON p.kind=m.kind AND p.provider_id=m.catalog_id AND p.active
         LEFT JOIN sc_titles t ON t.id=p.title_id LEFT JOIN sc_title_translations tx ON tx.title_id=t.id AND tx.language_id=(SELECT id FROM sc_languages WHERE code=$2)
         WHERE m.profile_id=$1 ORDER BY m.created_at DESC LIMIT 20`
