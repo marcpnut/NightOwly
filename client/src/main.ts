@@ -2926,7 +2926,8 @@ document.addEventListener('keydown', (event) => {
   const key = event.keyCode;
   const isBack = [461, 10009, 8, 27].includes(key) || ['Escape', 'BrowserBack'].includes(event.key);
   const channelDirection = channelSurfDirection(event);
-  if (channelDirection && view === 'live' && ((!player.classList.contains('hidden') && playingItem?.kind === 'live') || player.classList.contains('hidden'))) {
+  if (channelDirection && view === 'live' && !webosExitPrompt && el('central-remux-prompt').classList.contains('hidden') && el('central-playback-error').classList.contains('hidden')
+    && ((!player.classList.contains('hidden') && playingItem?.kind === 'live') || player.classList.contains('hidden'))) {
     event.preventDefault(); event.stopImmediatePropagation(); void surfLiveChannel(channelDirection); return;
   }
   if (webosExitPrompt) {
